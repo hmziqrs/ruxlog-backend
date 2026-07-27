@@ -1,0 +1,22 @@
+[package]
+name = "rux-fcm"
+version = "0.1.0"
+edition = "2021"
+description = "Firebase Cloud Messaging (HTTP v1) client for ruxlog"
+publish = false
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "charset",
+    "http2",
+] }
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+secrecy = "0.10"
+thiserror = "2.0"
+tracing = "0.1"
+tokio = { version = "1", features = ["sync"] }
+chrono = "0.4"

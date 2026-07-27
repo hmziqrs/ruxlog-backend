@@ -12,7 +12,10 @@ use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use tracing::instrument;
 
 use crate::{
-    db::sea_models::post::PostStatus,
+    db::sea_models::{
+        pagination::{paginate_query, PagedRaw},
+        post::PostStatus,
+    },
     error::{ErrorCode, ErrorResponse},
     extractors::ValidatedJson,
     services::auth::AuthSession,
@@ -33,7 +36,6 @@ use super::validator::{
 struct RegistrationTrendRow {
     bucket: String,
     new_users: i64,
-    total: Option<i64>,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -42,7 +44,6 @@ struct VerificationRateRow {
     requested: i64,
     verified: i64,
     success_rate: f64,
-    total: Option<i64>,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -58,7 +59,6 @@ struct PageViewRow {
     bucket: String,
     views: i64,
     unique_visitors: i64,
-    total: Option<i64>,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -68,7 +68,6 @@ struct CommentRateRow {
     views: i64,
     comments: i64,
     comment_rate: f64,
-    total: Option<i64>,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -78,7 +77,6 @@ struct NewsletterGrowthRow {
     confirmed: i64,
     unsubscribed: i64,
     net_growth: i64,
-    total: Option<i64>,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -87,7 +85,6 @@ struct MediaUploadRow {
     upload_count: i64,
     total_size_mb: f64,
     avg_size_mb: f64,
-    total: Option<i64>,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -112,8 +109,6 @@ pub async fn registration_trends(
 ) -> Result<impl IntoResponse, ErrorResponse> {
     let ValidatedJson(request) = payload;
     let resolved = request.envelope.resolve();
-    let limit = resolved.per_page as i64;
-    let offset = resolved.offset() as i64;
 
     let interval = request.filters.group_by;
     let bucket_expr = interval.to_bucket_expr("users.created_at");
@@ -144,36 +139,28 @@ pub async fn registration_trends(
             WHERE created_at >= $1 AND created_at <= $2
             GROUP BY 1
         )
-        SELECT bucket, new_users, COUNT(*) OVER () AS total
+        SELECT bucket, new_users
         FROM bucketed
         {order_clause}
-        LIMIT $3 OFFSET $4
         "#,
         bucket_expr = bucket_expr,
         order_clause = order_clause,
     );
 
-    let stmt = Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        vec![
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
-            Value::BigInt(Some(limit)),
-            Value::BigInt(Some(offset)),
-        ],
-    );
+    let params = vec![
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
+    ];
 
-    let rows = RegistrationTrendRow::find_by_statement(stmt)
-        .all(&state.sea_db)
-        .await
-        .map_err(ErrorResponse::from)?;
-
-    let total = rows
-        .first()
-        .and_then(|row| row.total)
-        .unwrap_or_default()
-        .max(0) as u64;
+    let PagedRaw { rows, total } = paginate_query::<RegistrationTrendRow>(
+        &state.sea_db,
+        &sql,
+        params,
+        resolved.page,
+        resolved.per_page,
+    )
+    .await
+    .map_err(ErrorResponse::from)?;
 
     let data: Vec<RegistrationTrendPoint> = rows
         .into_iter()
@@ -200,8 +187,6 @@ pub async fn verification_rates(
 ) -> Result<impl IntoResponse, ErrorResponse> {
     let ValidatedJson(request) = payload;
     let resolved = request.envelope.resolve();
-    let limit = resolved.per_page as i64;
-    let offset = resolved.offset() as i64;
 
     let interval = request.filters.group_by;
     let bucket_expr = interval.to_bucket_expr("email_verifications.created_at");
@@ -260,38 +245,29 @@ pub async fn verification_rates(
             CASE
                 WHEN requested = 0 THEN 0::FLOAT8
                 ELSE ROUND((verified::NUMERIC / requested::NUMERIC) * 100, 2)::FLOAT8
-            END AS success_rate,
-            COUNT(*) OVER () AS total
+            END AS success_rate
         FROM combined
         {order_clause}
-        LIMIT $3 OFFSET $4
         "#,
         bucket_expr = bucket_expr,
         user_bucket_expr = user_bucket_expr,
         order_clause = order_clause,
     );
 
-    let stmt = Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        vec![
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
-            Value::BigInt(Some(limit)),
-            Value::BigInt(Some(offset)),
-        ],
-    );
+    let params = vec![
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
+    ];
 
-    let rows = VerificationRateRow::find_by_statement(stmt)
-        .all(&state.sea_db)
-        .await
-        .map_err(ErrorResponse::from)?;
-
-    let total = rows
-        .first()
-        .and_then(|row| row.total)
-        .unwrap_or_default()
-        .max(0) as u64;
+    let PagedRaw { rows, total } = paginate_query::<VerificationRateRow>(
+        &state.sea_db,
+        &sql,
+        params,
+        resolved.page,
+        resolved.per_page,
+    )
+    .await
+    .map_err(ErrorResponse::from)?;
 
     let data: Vec<VerificationRatePoint> = rows
         .into_iter()
@@ -320,6 +296,16 @@ pub async fn publishing_trends(
 ) -> Result<impl IntoResponse, ErrorResponse> {
     let ValidatedJson(request) = payload;
     let resolved = request.envelope.resolve();
+
+    // NOTE(issue #23): this handler intentionally does NOT use
+    // `pagination::paginate_query`. The pagination unit here is a *distinct
+    // bucket*, but each bucket fans out to one output row per post status, so
+    // the output row count != bucket count. The `ROW_NUMBER()` window over the
+    // distinct buckets combined with `COUNT(*) OVER ()` is therefore kept
+    // bespoke: `paginate_query`'s `SELECT COUNT(*) FROM (<body>)` wrap would
+    // over-count (it would count bucket×status rows, not buckets) and its
+    // appended `LIMIT`/`OFFSET` would paginate the wrong shape. The page window
+    // is instead selected with `WHERE b.rn > $4 AND b.rn <= $4 + $3`.
     let limit = resolved.per_page as i64;
     let offset = resolved.offset() as i64;
 
@@ -468,8 +454,6 @@ pub async fn page_views(
 ) -> Result<impl IntoResponse, ErrorResponse> {
     let ValidatedJson(request) = payload;
     let resolved = request.envelope.resolve();
-    let limit = resolved.per_page as i64;
-    let offset = resolved.offset() as i64;
 
     let filters = &request.filters;
     let interval = filters.group_by;
@@ -510,40 +494,31 @@ pub async fn page_views(
         SELECT
             bucket,
             CASE WHEN $5 THEN unique_visitors ELSE views END AS views,
-            unique_visitors,
-            COUNT(*) OVER () AS total
+            unique_visitors
         FROM bucketed
         {order_clause}
-        LIMIT $6 OFFSET $7
         "#,
         bucket_expr = bucket_expr,
         order_clause = order_clause,
     );
 
-    let stmt = Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        vec![
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
-            Value::Int(post_id_filter),
-            Value::Int(author_id_filter),
-            Value::Bool(Some(only_unique)),
-            Value::BigInt(Some(limit)),
-            Value::BigInt(Some(offset)),
-        ],
-    );
+    let params = vec![
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
+        Value::Int(post_id_filter),
+        Value::Int(author_id_filter),
+        Value::Bool(Some(only_unique)),
+    ];
 
-    let rows = PageViewRow::find_by_statement(stmt)
-        .all(&state.sea_db)
-        .await
-        .map_err(ErrorResponse::from)?;
-
-    let total = rows
-        .first()
-        .and_then(|row| row.total)
-        .unwrap_or_default()
-        .max(0) as u64;
+    let PagedRaw { rows, total } = paginate_query::<PageViewRow>(
+        &state.sea_db,
+        &sql,
+        params,
+        resolved.page,
+        resolved.per_page,
+    )
+    .await
+    .map_err(ErrorResponse::from)?;
 
     let data: Vec<PageViewPoint> = rows
         .into_iter()
@@ -582,8 +557,6 @@ pub async fn comment_rate(
 ) -> Result<impl IntoResponse, ErrorResponse> {
     let ValidatedJson(request) = payload;
     let resolved = request.envelope.resolve();
-    let limit = resolved.per_page as i64;
-    let offset = resolved.offset() as i64;
 
     let min_views = request.filters.min_views.max(0);
     let sort_order = match request.filters.sort_by {
@@ -632,37 +605,28 @@ pub async fn comment_rate(
             title,
             views,
             comments,
-            comment_rate,
-            COUNT(*) OVER () AS total
+            comment_rate
         FROM combined
         {sort_order}
-        LIMIT $4 OFFSET $5
         "#,
         sort_order = sort_order,
     );
 
-    let stmt = Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        vec![
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
-            Value::BigInt(Some(min_views)),
-            Value::BigInt(Some(limit)),
-            Value::BigInt(Some(offset)),
-        ],
-    );
+    let params = vec![
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
+        Value::BigInt(Some(min_views)),
+    ];
 
-    let rows = CommentRateRow::find_by_statement(stmt)
-        .all(&state.sea_db)
-        .await
-        .map_err(ErrorResponse::from)?;
-
-    let total = rows
-        .first()
-        .and_then(|row| row.total)
-        .unwrap_or_default()
-        .max(0) as u64;
+    let PagedRaw { rows, total } = paginate_query::<CommentRateRow>(
+        &state.sea_db,
+        &sql,
+        params,
+        resolved.page,
+        resolved.per_page,
+    )
+    .await
+    .map_err(ErrorResponse::from)?;
 
     let data: Vec<CommentRatePoint> = rows
         .into_iter()
@@ -700,8 +664,6 @@ pub async fn newsletter_growth(
 ) -> Result<impl IntoResponse, ErrorResponse> {
     let ValidatedJson(request) = payload;
     let resolved = request.envelope.resolve();
-    let limit = resolved.per_page as i64;
-    let offset = resolved.offset() as i64;
 
     let interval = request.filters.group_by;
     let created_bucket_expr = interval.to_bucket_expr("created_at");
@@ -751,38 +713,29 @@ pub async fn newsletter_growth(
             new_subscribers,
             confirmed,
             unsubscribed,
-            (confirmed - unsubscribed) AS net_growth,
-            COUNT(*) OVER () AS total
+            (confirmed - unsubscribed) AS net_growth
         FROM combined
         {order_clause}
-        LIMIT $3 OFFSET $4
         "#,
         created_bucket_expr = created_bucket_expr,
         updated_bucket_expr = updated_bucket_expr,
         order_clause = order_clause,
     );
 
-    let stmt = Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        vec![
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
-            Value::BigInt(Some(limit)),
-            Value::BigInt(Some(offset)),
-        ],
-    );
+    let params = vec![
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
+    ];
 
-    let rows = NewsletterGrowthRow::find_by_statement(stmt)
-        .all(&state.sea_db)
-        .await
-        .map_err(ErrorResponse::from)?;
-
-    let total = rows
-        .first()
-        .and_then(|row| row.total)
-        .unwrap_or_default()
-        .max(0) as u64;
+    let PagedRaw { rows, total } = paginate_query::<NewsletterGrowthRow>(
+        &state.sea_db,
+        &sql,
+        params,
+        resolved.page,
+        resolved.per_page,
+    )
+    .await
+    .map_err(ErrorResponse::from)?;
 
     let data: Vec<NewsletterGrowthPoint> = rows
         .into_iter()
@@ -811,8 +764,6 @@ pub async fn media_upload_trends(
 ) -> Result<impl IntoResponse, ErrorResponse> {
     let ValidatedJson(request) = payload;
     let resolved = request.envelope.resolve();
-    let limit = resolved.per_page as i64;
-    let offset = resolved.offset() as i64;
 
     let interval = request.filters.group_by;
     let bucket_expr = interval.to_bucket_expr("created_at");
@@ -836,37 +787,28 @@ pub async fn media_upload_trends(
             CASE
                 WHEN upload_count = 0 THEN 0::FLOAT8
                 ELSE ROUND(((total_size_bytes::NUMERIC / upload_count::NUMERIC) / 1024 / 1024), 2)::FLOAT8
-            END AS avg_size_mb,
-            COUNT(*) OVER () AS total
+            END AS avg_size_mb
         FROM bucketed
         {order_clause}
-        LIMIT $3 OFFSET $4
         "#,
         bucket_expr = bucket_expr,
         order_clause = order_clause,
     );
 
-    let stmt = Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        vec![
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
-            Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
-            Value::BigInt(Some(limit)),
-            Value::BigInt(Some(offset)),
-        ],
-    );
+    let params = vec![
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_from))),
+        Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
+    ];
 
-    let rows = MediaUploadRow::find_by_statement(stmt)
-        .all(&state.sea_db)
-        .await
-        .map_err(ErrorResponse::from)?;
-
-    let total = rows
-        .first()
-        .and_then(|row| row.total)
-        .unwrap_or_default()
-        .max(0) as u64;
+    let PagedRaw { rows, total } = paginate_query::<MediaUploadRow>(
+        &state.sea_db,
+        &sql,
+        params,
+        resolved.page,
+        resolved.per_page,
+    )
+    .await
+    .map_err(ErrorResponse::from)?;
 
     let data: Vec<MediaUploadPoint> = rows
         .into_iter()

@@ -3,8 +3,10 @@
 //! Tests public endpoints and error handling against a live API server.
 //! Run with: cargo test --test api_integration
 //!
-//! Requires the API server running on the port specified by BASE_URL
-//! (default: http://127.0.0.1:1100) with a migrated database.
+//! Requires the API server running on the URL specified by the `BASE_URL` env
+//! var (default: http://127.0.0.1:8888) with a migrated database. The e2e
+//! workflow (`.github/workflows/e2e.yml`) overrides `BASE_URL` to point at the
+//! CI service container it brings up.
 //!
 //! CSRF: the per-session token (plan Phase 5) is HMAC-bound to the session id,
 //! so these tests bootstrap a real token from `/csrf/v1/generate` and carry it
@@ -16,7 +18,12 @@ use std::time::Duration;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 
-const BASE_URL: &str = "http://127.0.0.1:1100";
+/// Base URL of the API under test. Reads `BASE_URL` from env (default
+/// `http://127.0.0.1:8888`) so the same suite runs against a local dev server
+/// or a CI container started by `.github/workflows/e2e.yml`.
+fn base_url() -> String {
+    std::env::var("BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8888".to_string())
+}
 
 /// A cookie-storing client so the session cookie issued by
 /// `/csrf/v1/generate` is replayed on later requests — the token is only valid
@@ -31,7 +38,7 @@ fn client() -> Client {
 
 async fn is_server_up(client: &Client) -> bool {
     client
-        .get(format!("{BASE_URL}/healthz"))
+        .get(format!("{}/healthz", base_url()))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -41,7 +48,7 @@ async fn is_server_up(client: &Client) -> bool {
 macro_rules! skip_if_no_server {
     ($client:expr) => {
         if !is_server_up(&$client).await {
-            eprintln!("SKIP: API server not running on {BASE_URL}");
+            eprintln!("SKIP: API server not running on {}", base_url());
             return;
         }
     };
@@ -53,7 +60,7 @@ macro_rules! skip_if_no_server {
 /// Returns `None` if the server is unreachable or misbehaves.
 async fn bootstrap_csrf(client: &Client) -> Option<String> {
     let resp = client
-        .post(format!("{BASE_URL}/csrf/v1/generate"))
+        .post(format!("{}/csrf/v1/generate", base_url()))
         .send()
         .await
         .ok()?;
@@ -73,7 +80,7 @@ async fn require_csrf(client: &Client) -> String {
 
 async fn post_api(client: &Client, path: &str, body: Value, token: &str) -> reqwest::Response {
     client
-        .post(format!("{BASE_URL}{path}"))
+        .post(format!("{}{}", base_url(), path))
         .header("csrf-token", token)
         .header("Content-Type", "application/json")
         .json(&body)
@@ -84,7 +91,7 @@ async fn post_api(client: &Client, path: &str, body: Value, token: &str) -> reqw
 
 async fn get_api(client: &Client, path: &str) -> reqwest::Response {
     client
-        .get(format!("{BASE_URL}{path}"))
+        .get(format!("{}{}", base_url(), path))
         .send()
         .await
         .unwrap()
@@ -97,7 +104,7 @@ async fn healthz_returns_ok() {
     let client = client();
     skip_if_no_server!(client);
     let resp = client
-        .get(format!("{BASE_URL}/healthz"))
+        .get(format!("{}/healthz", base_url()))
         .send()
         .await
         .unwrap();
@@ -266,7 +273,7 @@ async fn post_without_csrf_token_returns_unauthorized() {
     let client = client();
     skip_if_no_server!(client);
     let resp = client
-        .post(format!("{BASE_URL}/post/v1/list/published"))
+        .post(format!("{}/post/v1/list/published", base_url()))
         .header("Content-Type", "application/json")
         .json(&json!({"page": 1}))
         .send()
@@ -290,7 +297,7 @@ async fn post_with_invalid_csrf_token_returns_unauthorized() {
     // missing session.
     require_csrf(&client).await;
     let resp = client
-        .post(format!("{BASE_URL}/post/v1/list/published"))
+        .post(format!("{}/post/v1/list/published", base_url()))
         .header("csrf-token", "this-token-does-not-match-the-session")
         .header("Content-Type", "application/json")
         .json(&json!({"page": 1}))
@@ -312,10 +319,10 @@ async fn login_with_invalid_credentials_returns_unauthorized() {
     skip_if_no_server!(client);
     let token = require_csrf(&client).await;
     let resp = client
-        .post(format!("{BASE_URL}/auth/v1/log_in"))
+        .post(format!("{}/auth/v1/log_in", base_url()))
         .header("csrf-token", token)
         .header("Content-Type", "application/json")
-        .json(&json!({"email": "nonexistent@test.com", "password": "wrong"}))
+        .json(&json!({"email": "nonexistent@test.com", "password": "wrong-password-12345"}))
         .send()
         .await
         .unwrap();
@@ -332,7 +339,7 @@ async fn login_with_missing_fields_returns_error() {
     skip_if_no_server!(client);
     let token = require_csrf(&client).await;
     let resp = client
-        .post(format!("{BASE_URL}/auth/v1/log_in"))
+        .post(format!("{}/auth/v1/log_in", base_url()))
         .header("csrf-token", token)
         .header("Content-Type", "application/json")
         .json(&json!({}))
@@ -413,13 +420,7 @@ async fn search_with_query_returns_ok() {
     let client = client();
     skip_if_no_server!(client);
     let token = require_csrf(&client).await;
-    let resp = post_api(
-        &client,
-        "/search/v1/search",
-        json!({"query": "rust"}),
-        &token,
-    )
-    .await;
+    let resp = post_api(&client, "/search/v1/search", json!({"q": "rust"}), &token).await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
 

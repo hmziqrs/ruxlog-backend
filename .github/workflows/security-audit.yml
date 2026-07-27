@@ -69,10 +69,10 @@ jobs:
       # cargo-deny resolves its lockfile from the workspace root, so this reads
       # the same canonical Cargo.lock as `cargo audit`.
       #
-      # NOTE: `--config deny.toml` MUST come AFTER the `check` subcommand.
-      # Putting it before `check` makes cargo-deny reject the flag (exit 2)
-      # before performing any check — silently disabling the whole step.
+      # `--config` is a GLOBAL cargo-deny option, so it MUST come BEFORE the
+      # `check` subcommand. Passing it after `check` makes cargo-deny reject the
+      # flag with exit 2 (the prior ordering silently disabled the whole step).
       - name: cargo deny check
         run: |
-          cargo deny --manifest-path backend/api/Cargo.toml \
-            check --config deny.toml advisories bans licenses sources
+          cargo deny --manifest-path backend/api/Cargo.toml --config deny.toml \
+            check advisories bans licenses sources

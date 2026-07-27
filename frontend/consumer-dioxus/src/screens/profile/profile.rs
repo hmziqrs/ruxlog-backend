@@ -2,13 +2,23 @@ use dioxus::prelude::*;
 use hmziq_dioxus_free_icons::icons::ld_icons::{LdMail, LdUser};
 use hmziq_dioxus_free_icons::Icon;
 use oxui::shadcn::button::{Button, ButtonVariant};
-use ruxlog_shared::use_auth;
+use ruxlog_shared::store::passkey::RegisterFinishPayload;
+use ruxlog_shared::{use_auth, use_passkey};
 
 #[component]
 pub fn ProfileScreen() -> Element {
     let auth_store = use_auth();
     let nav = use_navigator();
     let user = auth_store.user.read();
+    let passkey_store = use_passkey();
+    // Passkeys (WebAuthn, issue #4): list the user's registered credentials on
+    // mount so the "Security keys" section reflects the real server state.
+    use_effect(move || {
+        let passkey_store = use_passkey();
+        spawn(async move {
+            passkey_store.list().await;
+        });
+    });
 
     if let Some(user) = &*user {
         rsx! {
@@ -72,6 +82,92 @@ pub fn ProfileScreen() -> Element {
                                                 "⚠ Not verified"
                                             }
                                         }
+                                    }
+                                }
+
+                                // Security keys / Passkeys (issue #4).
+                                // Lists the user's registered WebAuthn credentials
+                                // with register/remove actions that flow through the
+                                // passkey store + browser WebAuthn helper.
+                                div { class: "pt-6 border-t border-border",
+                                    p { class: "text-sm mb-3 font-medium",
+                                        "Security keys (Passkeys)"
+                                    }
+                                    if !crate::passkey::is_supported() {
+                                        p { class: "text-xs text-muted-foreground mb-3",
+                                            "Your browser does not support passkeys."
+                                        }
+                                    }
+                                    div { class: "space-y-2 mb-3",
+                                        for cred in passkey_store.list.read().data.clone().unwrap_or_default() {
+                                            div {
+                                                class: "flex items-center justify-between p-3 rounded-lg border border-border",
+                                                p {
+                                                    class: "font-medium text-sm",
+                                                    { cred.device_type.clone().unwrap_or_else(|| "Passkey".to_string()) }
+                                                }
+                                                Button {
+                                                    variant: ButtonVariant::Outline,
+                                                    onclick: {
+                                                        let cred_id = cred.credential_id.clone();
+                                                        move |_| {
+                                                            let cred_id = cred_id.clone();
+                                                            spawn(async move {
+                                                                passkey_store.remove(cred_id).await;
+                                                                passkey_store.list().await;
+                                                            });
+                                                        }
+                                                    },
+                                                    "Remove"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Button {
+                                        class: "mt-3",
+                                        variant: ButtonVariant::Outline,
+                                        disabled: passkey_store.register.read().is_loading()
+                                            || !crate::passkey::is_supported(),
+                                        onclick: move |_e: Event<MouseData>| {
+                                            spawn(async move {
+                                                if let Some(begin) =
+                                                    passkey_store.register_begin().await
+                                                {
+                                                    match crate::passkey::create_credentials(
+                                                        &begin.challenge,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(credential) => {
+                                                            let registration_state =
+                                                                begin.registration_state;
+                                                            passkey_store
+                                                                .register_finish(
+                                                                    RegisterFinishPayload {
+                                                                        credential,
+                                                                        registration_state,
+                                                                        device_type: Some(
+                                                                            "WebAuthn".to_string(),
+                                                                        ),
+                                                                        transports: None,
+                                                                    },
+                                                                )
+                                                                .await;
+                                                            passkey_store.list().await;
+                                                        }
+                                                        Err(e) => {
+                                                            dioxus::logger::tracing::error!(
+                                                                "passkey registration failed: {e}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        if passkey_store.register.read().is_loading() {
+                                            div { class: "loading loading-spinner loading-xs" }
+                                        }
+                                        span { "Add passkey" }
                                     }
                                 }
 

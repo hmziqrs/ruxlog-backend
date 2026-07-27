@@ -55,6 +55,10 @@ mod m20260618_000049_subscriptions_provider_sub_id_unique;
 mod m20260620_000050_add_totp_last_used_counter;
 mod m20260620_000051_payout_account_metadata_encryption_runbook;
 mod m20260627_000052_alter_user_add_session_auth_secret_and_encrypt_fields;
+mod m20260727_000053_create_devices_table;
+mod m20260727_000054_create_notifications_table;
+mod m20260727_000055_create_passkey_credentials_table;
+mod m20260727_000056_create_user_oauth_identities_table;
 
 pub struct Migrator;
 
@@ -119,6 +123,10 @@ impl MigratorTrait for Migrator {
             Box::new(
                 m20260627_000052_alter_user_add_session_auth_secret_and_encrypt_fields::Migration,
             ),
+            Box::new(m20260727_000053_create_devices_table::Migration),
+            Box::new(m20260727_000054_create_notifications_table::Migration),
+            Box::new(m20260727_000055_create_passkey_credentials_table::Migration),
+            Box::new(m20260727_000056_create_user_oauth_identities_table::Migration),
         ]
     }
 }

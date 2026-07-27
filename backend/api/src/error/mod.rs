@@ -8,6 +8,7 @@ pub mod codes;
 pub mod database;
 pub mod middleware;
 pub mod response;
+pub mod serde;
 pub mod validation;
 
 pub use codes::ErrorCode;

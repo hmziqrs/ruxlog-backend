@@ -1,4 +1,6 @@
 use crate::components::CookieConsent;
+#[cfg(feature = "consumer-auth")]
+use crate::components::NotificationsBell;
 use crate::config::{DarkMode, BRAND};
 use crate::router::Route;
 use crate::utils::persist;
@@ -24,6 +26,12 @@ pub fn NavBarContainer() -> Element {
     let auth_store = use_auth();
     #[cfg(feature = "consumer-auth")]
     let user = auth_store.user.read();
+
+    // Register this browser's FCM token (if Firebase Messaging is present at
+    // runtime). No-ops cleanly when the JS SDK is absent or the user is logged
+    // out. Only compiled under analytics + consumer-auth.
+    #[cfg(all(feature = "analytics", feature = "consumer-auth"))]
+    crate::hooks::device_registration::use_device_registration();
 
     let mut dark_theme = use_context_provider(|| Signal::new(DarkMode(true)));
     let mut has_js_support = use_signal(|| false);
@@ -128,6 +136,23 @@ pub fn NavBarContainer() -> Element {
         }
     };
 
+    // Notification bell — only for logged-in users (consumer-auth). The bell
+    // polls the unread count itself; nothing to wire here beyond rendering it.
+    let notifications_ui: Option<Element> = {
+        #[cfg(feature = "consumer-auth")]
+        {
+            if user.is_some() {
+                Some(rsx! { NotificationsBell {} })
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "consumer-auth"))]
+        {
+            None
+        }
+    };
+
     rsx! {
         div { class: "min-h-screen flex flex-col",
             // Navbar
@@ -181,6 +206,9 @@ pub fn NavBarContainer() -> Element {
 
                             // Theme toggle (only available on WASM/webview, not native renderer)
                             { theme_toggle_ui }
+
+                            // Notification bell (only for logged-in users under consumer-auth)
+                            { notifications_ui }
 
                             // User menu - use Dioxus Link for client-side navigation (only with consumer-auth feature)
                             { auth_ui }

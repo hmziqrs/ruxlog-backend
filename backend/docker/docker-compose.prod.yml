@@ -1,0 +1,145 @@
+# Production application stack: backend API + Postgres + Valkey + Watchtower.
+#
+# This is the FULL app stack. The Traefik edge proxy is a SEPARATE compose
+# project (backend/traefik/docker-compose.prod.yml) that brings up the
+# `${PROJECT}_network` as an external network and terminates TLS; bring it up
+# first (see backend/api/docs/DEPLOY_STEPS.md).
+#
+# Routing / TLS / HSTS / CSP are NOT redefined here. They live in the Traefik
+# file provider at backend/traefik/dynamic/traefik-dynamic.yml — specifically
+# the `api-spa-secure` router (PathPrefix `/`, priority 1000) whose
+# `api-backend` load-balancer target is `http://api:8888`. The backend service
+# below publishes the network alias `api` so that file-provider target resolves,
+# and adds a Host-scoped Docker-provider router that REUSES the file-provider
+# middlewares (`secure-transport-headers@file`, `spa-csp-headers@file`) rather
+# than redefining them.
+#
+# Usage (always pass the env file so both interpolation and container env resolve):
+#   docker compose --env-file deploy.env -f backend/docker/docker-compose.prod.yml up -d
+#
+# `deploy.env` is the single source for compose interpolation vars
+# (PROJECT, BACKEND_IMAGE, BACKEND_DOMAIN, ...) and for the secrets/credentials
+# the containers read at runtime (DB, Redis, SMTP, S3, FCM, ...). See
+# deploy.env.example.
+
+name: ${PROJECT}
+
+services:
+  backend:
+    image: ${BACKEND_IMAGE}
+    container_name: ${PROJECT}_backend
+    env_file: [deploy.env]
+    environment:
+      # Deterministic in-network addressing (the app binds HOST:PORT and
+      # defaults PORT to 8888; force it so the healthcheck and Traefik's
+      # http://api:8888 target are always correct regardless of deploy.env).
+      HOST: "0.0.0.0"
+      PORT: "8888"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_HOST: valkey
+      REDIS_PORT: "6379"
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8888/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      external_network:
+        # Matches the `api-backend` load-balancer target (http://api:8888)
+        # declared in backend/traefik/dynamic/traefik-dynamic.yml.
+        aliases:
+          - api
+      internal: {}
+    labels:
+      # Traefik discovery. The authoritative edge policy is the file-provider
+      # `api-spa-secure` router; this Host rule feeds the same backend and
+      # REUSES the file middlewares (we do NOT redefine TLS/HSTS/CSP here).
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROJECT}_network"
+      - "traefik.http.routers.api.rule=Host(`${BACKEND_DOMAIN}`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.api.middlewares=secure-transport-headers@file,spa-csp-headers@file"
+      - "traefik.http.services.api.loadBalancer.server.port=8888"
+      # Watchtower opt-in: only containers with this label are auto-updated.
+      - "com.centurylinklabs.watchtower.enable=true"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18.1-alpine
+    container_name: ${PROJECT}_postgres
+    env_file: [deploy.env]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Same init scripts as the dev stack (uuid-ossp, pgcrypto, seed guards).
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:8.0-alpine
+    container_name: ${PROJECT}_valkey
+    env_file: [deploy.env]
+    command:
+      - valkey-server
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --acl-pubsub-default
+      - allchannels
+      - --aclfile
+      - /etc/valkey/users.acl
+    volumes:
+      - valkey_data:/data
+      - ./redis/users.acl:/etc/valkey/users.acl:ro
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-u", "redis://${REDIS_USER}:${REDIS_PASSWORD}@localhost:6379", "PING"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  watchtower:
+    # Zero-SSH auto-updates: polls GHCR for new tags on labeled containers only.
+    image: containrrr/watchtower:latest
+    container_name: ${PROJECT}_watchtower
+    command:
+      - --label-enable       # only update containers labeled for watchtower
+      - --interval=300       # check every 5 minutes
+      - --cleanup            # remove dangling images after update
+      - --rolling-restart    # safer restarts (drain before swap)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [external_network]
+    restart: unless-stopped
+
+networks:
+  # Shared with the Traefik edge proxy (created externally by the traefik stack).
+  external_network:
+    name: ${PROJECT}_network
+    external: true
+  # Data-plane isolation: Postgres/Valkey are NOT reachable from the proxy net.
+  internal: {}
+
+volumes:
+  postgres_data: {}
+  valkey_data: {}

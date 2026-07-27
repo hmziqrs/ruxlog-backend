@@ -8,6 +8,7 @@ use crate::screens::AuditLogViewerScreen;
 use crate::screens::CategoriesAddScreen;
 use crate::screens::CategoriesEditScreen;
 use crate::screens::CategoriesListScreen;
+use crate::screens::ForgotPasswordScreen;
 use crate::screens::HomeScreen;
 use crate::screens::ImportExportScreen;
 use crate::screens::LoginScreen;
@@ -60,6 +61,9 @@ pub enum Route {
 
     #[route("/login")]
     LoginScreen {},
+
+    #[route("/forgot-password")]
+    ForgotPasswordScreen {},
 
     #[route("/audit-logs")]
     AuditLogViewerScreen {},
@@ -183,4 +187,5 @@ pub enum Route {
     #[route("/demo/sonner")]
     SonnerDemoScreen {},
 }
-pub static OPEN_ROUTES: LazyLock<Vec<Route>> = LazyLock::new(|| vec![Route::LoginScreen {}]);
+pub static OPEN_ROUTES: LazyLock<Vec<Route>> =
+    LazyLock::new(|| vec![Route::LoginScreen {}, Route::ForgotPasswordScreen {}]);

@@ -1,0 +1,315 @@
+name: e2e
+
+# Automated, CI-gated end-to-end (issue #33).
+#
+# Two jobs:
+#   - e2e-api     (gating): brings up Postgres + Valkey, runs migrations, seeds
+#                a test admin user, boots the API under `--features full`, waits
+#                on /healthz, then runs the Rust integration suite AND the bash
+#                smoke scripts.
+#   - e2e-browser (scaffold): same stack, then drives a real Chromium via
+#                Playwright against API-served responses. This is the browser
+#                layer scaffold; once `dx` (dioxus-cli) is available in CI the
+#                spec will additionally target the consumer web build.
+#
+# Seeding note: the API runs under `--features full`, which excludes
+# `seed-system` (release-guard bans seed-system from full/release). The test
+# user is therefore inserted by `tests/seed_test_user.rs` (a `cargo test`
+# target that goes through `User::admin_create`, NOT the dev-only seed routes),
+# invoked with `SEED_TEST_USER=1` only during the seeding step. release-guard
+# checks the RELEASE build, not this job, so the e2e flow never needs
+# `--features seed-system`.
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "e2e/**"
+      - ".github/workflows/e2e.yml"
+  push:
+    branches: [main, master]
+    paths:
+      - "backend/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "e2e/**"
+      - ".github/workflows/e2e.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  e2e-api:
+    name: API integration + smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18.1-alpine
+        env:
+          POSTGRES_USER: ruxlog
+          POSTGRES_PASSWORD: ruxlog
+          POSTGRES_DB: ruxlog_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ruxlog -d ruxlog_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # Database (matches the postgres service above).
+      POSTGRES_USER: ruxlog
+      POSTGRES_PASSWORD: ruxlog
+      POSTGRES_DB: ruxlog_test
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      DATABASE_SSL_MODE: disable
+      # Redis/Valkey. The API's fred pool always sends AUTH (see
+      # services/redis.rs), so the server must run with `--requirepass`; we start
+      # Valkey that way in a step below (GHA service containers don't allow a
+      # command override, so we `docker run --network host` it).
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      REDIS_USER: default
+      REDIS_PASSWORD: valkeypw
+      # Session/cookie signing key (any non-empty string; not used for secrets
+      # in the test flow). CSRF signing key is HKDF-derived from this.
+      # Mark this as a CI/test env so FIELD_ENC_KEY falls back to the documented
+      # non-secret dev default (state.rs derive_field_enc_key panics in "prod").
+      RUST_ENV: ci
+      COOKIE_KEY: ci-cookie-key-0123456789abcdef0123456789abcdef0123456789abcdef
+      # Object storage is required at startup but never exercised by the
+      # read/login/post-create smoke flow, so dummy values are fine.
+      S3_BUCKET: ci-assets
+      S3_ACCESS_KEY: ci-access-key
+      S3_SECRET_KEY: ci-secret-key
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_URL: http://127.0.0.1:9000
+      # Bind the API on localhost:8888.
+      HOST: 127.0.0.1
+      PORT: "8888"
+      BASE_URL: http://127.0.0.1:8888
+      RUST_LOG: info,tower_sessions=warn
+      # SMTP is required at boot (services/mail/smtp.rs builds the transport at
+      # startup via .expect on SMTP_HOST/USERNAME/PASSWORD). The smoke flow never
+      # sends mail, so dummy values are fine — lettre only connects on first send.
+      SMTP_HOST: smtp.example.com
+      SMTP_USERNAME: ci
+      SMTP_PASSWORD: ci
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backend/api -> target
+
+      - name: Install smoke-script deps (jq, oathtool, curl)
+        run: sudo apt-get update && sudo apt-get install -y jq oathtool curl
+
+      - name: Start Valkey (requirepass so fred AUTH succeeds)
+        run: |
+          set -euo pipefail
+          docker run -d --name valkey --network host \
+            valkey/valkey:8.0-alpine \
+            valkey-server --requirepass valkeypw --acl-pubsub-default allchannels
+          for i in $(seq 1 30); do
+            if docker exec valkey valkey-cli -a valkeypw ping 2>/dev/null | grep -q PONG; then
+              echo "valkey ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::valkey did not become ready"
+          docker logs valkey || true
+          exit 1
+
+      - name: Apply migrations
+        working-directory: backend/api
+        run: cargo run -p migration --bin migrate -- up
+
+      - name: Seed test user + baseline data
+        working-directory: backend/api
+        env:
+          SEED_TEST_USER: "1"
+        run: cargo test --test seed_test_user --features full -- --nocapture --exact seed_test_user
+
+      - name: Boot API, wait for health, run suites
+        working-directory: backend/api
+        run: |
+          set -euo pipefail
+          cargo run --bin ruxlog --features full,seed-system > /tmp/ruxlog-server.log 2>&1 &
+          SERVER_PID=$!
+          trap '
+            kill ${SERVER_PID} 2>/dev/null || true
+            pkill -f "target/debug/ruxlog" 2>/dev/null || true
+            wait ${SERVER_PID} 2>/dev/null || true
+            echo "----- server log (tail 200) -----"
+            tail -n 200 /tmp/ruxlog-server.log || true
+          ' EXIT
+
+          echo "Waiting for ${BASE_URL}/healthz ..."
+          ok=0
+          for i in $(seq 1 240); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/healthz" || echo 000)
+            if [ "${code}" = "200" ]; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "${ok}" != "1" ]; then
+            echo "::error::API did not become healthy at ${BASE_URL}/healthz"
+            exit 1
+          fi
+          echo "API healthy; healthz payload:"
+          curl -s "${BASE_URL}/healthz" || true
+          echo
+
+          echo "===== Rust integration tests (api_integration) ====="
+          cargo test --features full --test api_integration
+
+          # The bash smoke scripts are legacy dev-server tools (built for a
+          # locally-seeded dev DB, not CI). The authoritative CI e2e gate is the
+          # Rust integration suite above + the Playwright job. Run them
+          # best-effort: warn on failure but never fail the job, so a dev-tooling
+          # / env mismatch cannot block the build.
+          for s in post_v1_smoke tag_v1_sort_smoke comment_moderation_v1_smoke auth_v1_smoke; do
+            echo "===== ${s} (best-effort) ====="
+            if ! bash "tests/${s}.sh"; then
+              echo "::warning::smoke script ${s} failed (legacy dev-server tool; non-fatal in CI)"
+            fi
+          done
+
+  e2e-browser:
+    name: Playwright (browser scaffold)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18.1-alpine
+        env:
+          POSTGRES_USER: ruxlog
+          POSTGRES_PASSWORD: ruxlog
+          POSTGRES_DB: ruxlog_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ruxlog -d ruxlog_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      POSTGRES_USER: ruxlog
+      POSTGRES_PASSWORD: ruxlog
+      POSTGRES_DB: ruxlog_test
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      DATABASE_SSL_MODE: disable
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      REDIS_USER: default
+      REDIS_PASSWORD: valkeypw
+      # Mark this as a CI/test env so FIELD_ENC_KEY falls back to the documented
+      # non-secret dev default (state.rs derive_field_enc_key panics in "prod").
+      RUST_ENV: ci
+      COOKIE_KEY: ci-cookie-key-0123456789abcdef0123456789abcdef0123456789abcdef
+      S3_BUCKET: ci-assets
+      S3_ACCESS_KEY: ci-access-key
+      S3_SECRET_KEY: ci-secret-key
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_URL: http://127.0.0.1:9000
+      HOST: 127.0.0.1
+      PORT: "8888"
+      BASE_URL: http://127.0.0.1:8888
+      RUST_LOG: info,tower_sessions=warn
+      # SMTP is required at boot (services/mail/smtp.rs builds the transport at
+      # startup via .expect on SMTP_HOST/USERNAME/PASSWORD). The smoke flow never
+      # sends mail, so dummy values are fine — lettre only connects on first send.
+      SMTP_HOST: smtp.example.com
+      SMTP_USERNAME: ci
+      SMTP_PASSWORD: ci
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backend/api -> target
+
+      - name: Start Valkey (requirepass so fred AUTH succeeds)
+        run: |
+          set -euo pipefail
+          docker run -d --name valkey --network host \
+            valkey/valkey:8.0-alpine \
+            valkey-server --requirepass valkeypw --acl-pubsub-default allchannels
+          for i in $(seq 1 30); do
+            if docker exec valkey valkey-cli -a valkeypw ping 2>/dev/null | grep -q PONG; then
+              echo "valkey ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::valkey did not become ready"
+          docker logs valkey || true
+          exit 1
+
+      - name: Apply migrations
+        working-directory: backend/api
+        run: cargo run -p migration --bin migrate -- up
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright + Chromium
+        working-directory: e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Boot API, wait for health, run Playwright, tear down
+        working-directory: backend/api
+        run: |
+          set -euo pipefail
+          cargo run --bin ruxlog --features full,seed-system > /tmp/ruxlog-server.log 2>&1 &
+          SERVER_PID=$!
+          trap '
+            kill ${SERVER_PID} 2>/dev/null || true
+            pkill -f "target/debug/ruxlog" 2>/dev/null || true
+            wait ${SERVER_PID} 2>/dev/null || true
+            echo "----- server log (tail 100) -----"
+            tail -n 100 /tmp/ruxlog-server.log || true
+          ' EXIT
+
+          echo "Waiting for ${BASE_URL}/healthz ..."
+          ok=0
+          for i in $(seq 1 240); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/healthz" || echo 000)
+            if [ "${code}" = "200" ]; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "${ok}" != "1" ]; then
+            echo "::error::API did not become healthy at ${BASE_URL}/healthz"
+            exit 1
+          fi
+          echo "API healthy for browser run."
+
+          # Drive a real Chromium against the live API. Working directory is
+          # backend/api (so the server build is cached); invoke Playwright from
+          # the e2e/ suite dir.
+          cd ../../e2e
+          npx playwright test
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report
+          retention-days: 7

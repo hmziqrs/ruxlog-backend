@@ -225,3 +225,79 @@ admin-editor-watch env='dev':
 
 admin-rpxy env='dev':
     {{dotenv_bin}} -e .env.{{env}} -- bash -lc 'cd {{admin_dir}} && bun run rpxy'
+
+# Production GHCR-image stack (backend/docker/docker-compose.prod.yml) --------
+# These wrap the production compose that runs the PUBLISHED image plus Postgres,
+# Valkey, and Watchtower. Bring the Traefik edge proxy up first and prepare
+# backend/docker/deploy.env (copy from deploy.env.example). See
+# backend/api/docs/DEPLOY_STEPS.md. (Distinct from the local `prod` recipe
+# above, which builds the dev-full stack from source.)
+
+prod_compose := "backend/docker/docker-compose.prod.yml"
+prod_envfile := "backend/docker/deploy.env"
+
+# Bring the prod stack up (pulls ${BACKEND_IMAGE}).
+deploy:
+    docker compose --env-file {{prod_envfile}} -f {{prod_compose}} up -d
+
+deploy-build:
+    docker compose --env-file {{prod_envfile}} -f {{prod_compose}} up -d --build
+
+deploy-down:
+    docker compose --env-file {{prod_envfile}} -f {{prod_compose}} down
+
+deploy-logs:
+    docker compose --env-file {{prod_envfile}} -f {{prod_compose}} logs -f
+
+deploy-ps:
+    docker compose --env-file {{prod_envfile}} -f {{prod_compose}} ps
+
+# Run sea-orm migrations as a one-shot against the prod stack. Requires the
+# `migrate` binary to be present in the image (see DEPLOY_STEPS.md §3 for the
+# interim host-based `cargo run -p migration --bin migrate -- up` path until
+# Dockerfile.api is extended to copy /app/migrate).
+deploy-migrate *args='up':
+    docker compose --env-file {{prod_envfile}} -f {{prod_compose}} run --rm backend /app/migrate {{args}}
+
+# End-to-end (issue #33) -----------------------------------------------------
+# Brings the API up locally, then runs the Rust integration suite + bash smoke
+# scripts against it (mirrors `.github/workflows/e2e.yml`).
+#
+# Prereqs: `just dev {{env}}` (or otherwise) has Postgres + Valkey reachable per
+# .env.{{env}}, and POSTGRES_HOST/PORT in that env are reachable FROM THE HOST
+# (not a docker-internal alias). Valkey must be started with `--requirepass` and
+# matching REDIS_USER/REDIS_PASSWORD because the API's fred pool always AUTHs.
+e2e env='dev':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{api_dir}}
+    set -a; source "../../.env.{{env}}"; set +a
+    export HOST="${HOST:-127.0.0.1}"
+    export PORT="${PORT:-8888}"
+    export BASE_URL="http://${HOST}:${PORT}"
+    echo "BASE_URL=${BASE_URL}"
+    cargo run -p migration --bin migrate -- up
+    SEED_TEST_USER=1 cargo test --test seed_test_user --features full -- --nocapture --exact seed_test_user
+    cargo run --bin ruxlog --features full > /tmp/ruxlog-e2e.log 2>&1 &
+    SERVER_PID=$!
+    trap '
+      kill ${SERVER_PID} 2>/dev/null || true
+      pkill -f "target/debug/ruxlog" 2>/dev/null || true
+      wait ${SERVER_PID} 2>/dev/null || true
+      echo "----- server log (tail 100) -----"; tail -n 100 /tmp/ruxlog-e2e.log || true
+    ' EXIT
+    echo "Waiting for ${BASE_URL}/healthz ..."
+    ok=0
+    for i in $(seq 1 240); do
+      code=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/healthz" || echo 000)
+      if [ "${code}" = "200" ]; then ok=1; break; fi
+      sleep 1
+    done
+    if [ "${ok}" != "1" ]; then echo "::error::API did not become healthy"; exit 1; fi
+    cargo test --features full --test api_integration
+    bash tests/post_v1_smoke.sh
+    bash tests/tag_v1_sort_smoke.sh
+    bash tests/comment_moderation_v1_smoke.sh
+    bash tests/auth_v1_smoke.sh
+    echo "===== e2e PASSED ====="
+

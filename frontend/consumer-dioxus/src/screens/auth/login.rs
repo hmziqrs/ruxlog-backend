@@ -6,8 +6,21 @@ use crate::screens::auth::{use_login_form, LoginForm};
 use oxui::components::animated_grid::{AnimatedGridBackground, AnimatedGridCircles, GridContext};
 use oxui::components::error::{ErrorDetails, ErrorDetailsVariant};
 use oxui::components::form::input::AppInput;
-use oxui::shadcn::button::Button;
-use ruxlog_shared::store::use_auth;
+use oxui::shadcn::button::{Button, ButtonVariant};
+use ruxlog_shared::store::passkey::LoginFinishPayload;
+use ruxlog_shared::store::{use_auth, use_passkey};
+
+/// Build the backend OAuth start URL for a provider. The OAuth flow is a
+/// full-page browser redirect (the backend owns the round-trip), so these are
+/// plain anchor `href`s — no fetch/CSRF needed. Mirrors the existing Google
+/// Sign-in wiring; the backend completes the callback and establishes a session.
+fn oauth_login_url(provider: &str) -> String {
+    format!(
+        "{}/auth/{}/v1/login",
+        crate::env::APP_API_URL.trim_end_matches('/'),
+        provider
+    )
+}
 
 #[component]
 pub fn LoginScreen() -> Element {
@@ -20,6 +33,7 @@ pub fn LoginScreen() -> Element {
     // is set we render a code input instead of the password form.
     let pending_totp_token = login_totp.data.clone();
     let nav = use_navigator();
+    let passkey_store = use_passkey();
 
     use_context_provider(GridContext::new);
 
@@ -127,9 +141,9 @@ pub fn LoginScreen() -> Element {
                                 }
                             }
                             div { class: "flex justify-end text-xs",
-                                a {
+                                Link {
+                                    to: Route::ForgotPasswordScreen {},
                                     class: "hover:underline font-medium",
-                                    href: "#",
                                     "Forgot password?"
                                 }
                             }
@@ -157,6 +171,95 @@ pub fn LoginScreen() -> Element {
                                     div { class: "loading loading-spinner loading-xs" }
                                 }
                                 span { "Login" }
+                            }
+                            // Passkey login (issue #4): discoverable WebAuthn
+                            // login — no email/password is sent; the
+                            // authenticator returns the credential, the backend
+                            // resolves the user and issues a full session.
+                            div { class: "pt-2",
+                                Button {
+                                    variant: ButtonVariant::Outline,
+                                    class: "w-full",
+                                    disabled: !crate::passkey::is_supported()
+                                        || passkey_store.login.read().is_loading(),
+                                    onclick: move |_e: Event<MouseData>| {
+                                        spawn(async move {
+                                            if let Some(begin) =
+                                                passkey_store.login_begin().await
+                                            {
+                                                match crate::passkey::get_credentials(
+                                                    &begin.challenge,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(credential) => {
+                                                        let authentication_state =
+                                                            begin.authentication_state;
+                                                        if let Some(resp) = passkey_store
+                                                            .login_finish(LoginFinishPayload {
+                                                                credential,
+                                                                authentication_state,
+                                                            })
+                                                            .await
+                                                        {
+                                                            *auth_store.user.write() =
+                                                                Some(resp.user);
+                                                            // Passkey login rotates the
+                                                            // session server-side; re-bind
+                                                            // the per-session CSRF token.
+                                                            let _ = oxcore::http::refresh_csrf_token().await;
+                                                            nav.push(
+                                                                crate::router::Route::HomeScreen {},
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        dioxus::logger::tracing::error!(
+                                                            "passkey login failed: {e}"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    },
+                                    if passkey_store.login.read().is_loading() {
+                                        div { class: "loading loading-spinner loading-xs" }
+                                    }
+                                    span { "Sign in with a passkey" }
+                                }
+                            }
+                            // Third-party Sign-in (issue #13). These are anchor
+                            // links, not fetches: clicking navigates the browser
+                            // to the backend OAuth start URL, which performs the
+                            // provider round-trip and establishes a session. Only
+                            // the providers enabled server-side (auth-oauth) will
+                            // answer; the SPA just offers the entry points.
+                            div { class: "relative my-4",
+                                div { class: "absolute inset-0 flex items-center",
+                                    span { class: "w-full border-t border-zinc-300 dark:border-zinc-700" }
+                                }
+                                div { class: "relative flex justify-center",
+                                    span { class: "bg-white dark:bg-zinc-900 px-2 text-xs text-zinc-500",
+                                        "or continue with"
+                                    }
+                                }
+                            }
+                            div { class: "grid grid-cols-3 gap-2",
+                                a {
+                                    class: "flex items-center justify-center rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors",
+                                    href: oauth_login_url("facebook"),
+                                    "Facebook"
+                                }
+                                a {
+                                    class: "flex items-center justify-center rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors",
+                                    href: oauth_login_url("github"),
+                                    "GitHub"
+                                }
+                                a {
+                                    class: "flex items-center justify-center rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors",
+                                    href: oauth_login_url("apple"),
+                                    "Apple"
+                                }
                             }
                         }
                     }

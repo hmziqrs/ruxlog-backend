@@ -1,4 +1,5 @@
 mod categories;
+mod forgot_password;
 mod home;
 mod login;
 mod media;
@@ -29,6 +30,7 @@ mod system_health;
 mod users;
 
 pub use categories::*;
+pub use forgot_password::*;
 pub use home::*;
 pub use login::*;
 pub use media::*;

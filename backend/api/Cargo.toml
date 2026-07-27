@@ -12,8 +12,11 @@ publish = false
 [features]
 default = ["basic"]
 
-# Basic blog (minimal) - DEFAULT for open source release
-basic = []
+# Basic blog (minimal) - DEFAULT for open source release.
+# Includes the #14 action toggles so a default build keeps ALL current behavior;
+# build with `--no-default-features --features <subset>` to strip an action
+# (e.g. disable post writes or the login route).
+basic = ["post-management", "auth-login", "auth-signup"]
 
 # Full feature set (opt-in for development/private use)
 full = [
@@ -27,6 +30,13 @@ full = [
     "admin-acl",
     "admin-routes",
     "billing",
+    "notifications",
+    "auth-passkey",
+    "image-moderation",
+    "cache",
+    "post-management",
+    "auth-login",
+    "auth-signup",
 ]
 
 # Individual features
@@ -53,10 +63,29 @@ openapi = ["utoipa", "utoipa-swagger-ui"]
 # Billing / monetization — all providers always compiled when billing is on
 billing = []
 
+# --- Features added for the issues batch (2026-07-27) ---
+# #29 in-app/push notifications (FCM v1 over reqwest+jsonwebtoken via internal rux-fcm crate)
+notifications = ["dep:rux-fcm"]
+# #4 passkey/WebAuthn (TOTP already done under auth-2fa)
+auth-passkey = ["dep:webauthn-rs", "dep:webauthn-rs-proto", "dep:url"]
+# #9 pluggable NSFW/image moderation gate on upload
+image-moderation = []
+# #5/#10 redis response + 3rd-party API caching, post cache CRUD
+cache = []
+# #14 toggles: build WITHOUT one to disable that action (in basic+full by default)
+post-management = []
+auth-login = []
+auth-signup = []
+
 [dependencies]
 rux-auth = { path = "./crates/rux-auth" }
 migration = { path = "./migration" }
 ruxlog-types = { path = "../../crates/ruxlog-types", features = ["backend", "slug"] }
+# --- Optional deps for the issues-batch features (see [features]) ---
+rux-fcm = { path = "./crates/rux-fcm", optional = true }
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"], optional = true }
+webauthn-rs-proto = { version = "0.5", optional = true }
+url = { version = "2.5", optional = true }
 axum = { version = "0.8.9", features = ["multipart"] }
 axum-extra = { version = "0.10.1", features = [
     "typed-header",

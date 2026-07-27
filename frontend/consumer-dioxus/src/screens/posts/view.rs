@@ -126,6 +126,26 @@ pub fn PostViewScreen(slug: String) -> Element {
         });
     }
 
+    // Backend view tracking — record this view against the post so the server-side
+    // view counter increments via POST /post/v1/track_view/{id}. This is
+    // unconditional (the Firebase tracker above is feature-gated behind `analytics`)
+    // and fire-and-forget via `spawn`.
+    {
+        let tracking_id: i32 = match &post_state {
+            Some(Ok(Some(post))) => post.id,
+            _ => 0,
+        };
+
+        use_effect(move || {
+            if tracking_id != 0 {
+                let posts = ruxlog_shared::store::use_post();
+                spawn(async move {
+                    posts.track_view(tracking_id).await;
+                });
+            }
+        });
+    }
+
     match post_state {
         Some(Ok(Some(post))) => {
             // Generate SEO metadata

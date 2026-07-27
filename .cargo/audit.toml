@@ -48,4 +48,20 @@ ignore = [
     # Listed here for parity: cargo-audit already treats informational
     # advisories as non-fatal warnings; this additionally silences the line.
     "RUSTSEC-2025-0052",
+    # ── 2026-07-27: three new advisories, no fix for the pinned version. ──
+    # ammonia 4.1.3 — XSS via SVG `animate`/`set` tags (RUSTSEC-2026-0213).
+    # 4.1.3 is the latest published ammonia; no patched release yet. ruxlog uses
+    # ammonia only to sanitize post HTML on read (#22). Reassess > 4.1.3.
+    "RUSTSEC-2026-0213",
+    # crossbeam-epoch 0.9.18 — invalid-pointer deref in fmt::Pointer for
+    # Atomic/Shared (RUSTSEC-2026-0204). 0.9.18 is the max in the resolved range
+    # (cargo update cannot bump); the unsafe path needs an already-invalid
+    # pointer ruxlog never constructs. Reassess > 0.9.18.
+    "RUSTSEC-2026-0204",
+    # quick-xml 0.30.0 — quadratic-time duplicate-attr + unbounded NS-decl DoS
+    # (RUSTSEC-2026-0194, -0195). Pinned by a transitive consumer at ^0.30 (a
+    # cargo update cannot cross the major); a fixed 0.39.4 copy already exists
+    # in the graph for the other consumer. Reassess when the parent bumps.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]

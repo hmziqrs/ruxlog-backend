@@ -110,13 +110,7 @@ pub fn validate_upload(
         .and_then(|n| n.rsplit_once('.'))
         .map(|(_, e)| e.trim().to_ascii_lowercase())
         .filter(|e| !e.is_empty())
-        .and_then(|e| {
-            if ALLOWED_EXTENSIONS.iter().any(|a| *a == e) {
-                Some(e)
-            } else {
-                None
-            }
-        })
+        .filter(|e| ALLOWED_EXTENSIONS.iter().any(|a| *a == e))
         .unwrap_or_else(|| extension_for_mime(&normalized_mime).to_string());
 
     Ok((normalized_mime, extension))

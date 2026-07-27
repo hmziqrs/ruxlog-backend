@@ -55,6 +55,12 @@ ignore = [
     # the migration setup; the runtime itself is tokio. Accepted until the
     # migration crate's async-std usage can be removed upstream.
     { id = "RUSTSEC-2025-0052", reason = "async-std unmaintained; pinned by the `migration` path-crate, no drop-in; runtime is tokio." },
+
+    # ── 2026-07-27: three new advisories, no fix available for the pinned version. ──
+    { id = "RUSTSEC-2026-0213", reason = "ammonia 4.1.3 XSS via SVG animate/set; 4.1.3 is latest published, no patch yet; used only to sanitize post HTML on read." },
+    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch 0.9.18 invalid-ptr deref in fmt::Pointer; 0.9.18 is max in range (cargo update cannot bump); unsafe path needs an already-invalid pointer ruxlog never constructs." },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.30.0 quadratic-time dup-attr DoS; pinned transitively at ^0.30 (cannot bump); fixed 0.39.4 copy coexists in the graph." },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.30.0 unbounded NS-decl memory-exhaust DoS; pinned transitively at ^0.30 (cannot bump); fixed 0.39.4 copy coexists in the graph." },
 ]
 
 # ── Licenses: deny anything outside this allowlist. ─────────────────────────

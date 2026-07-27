@@ -111,6 +111,7 @@ pub fn ProfileScreen() -> Element {
                                                     onclick: {
                                                         let cred_id = cred.credential_id.clone();
                                                         move |_| {
+                                                            let cred_id = cred_id.clone();
                                                             spawn(async move {
                                                                 passkey_store.remove(cred_id).await;
                                                                 passkey_store.list().await;

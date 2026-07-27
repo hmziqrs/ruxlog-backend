@@ -91,6 +91,12 @@ jobs:
       PORT: "8888"
       BASE_URL: http://127.0.0.1:8888
       RUST_LOG: info,tower_sessions=warn
+      # SMTP is required at boot (services/mail/smtp.rs builds the transport at
+      # startup via .expect on SMTP_HOST/USERNAME/PASSWORD). The smoke flow never
+      # sends mail, so dummy values are fine — lettre only connects on first send.
+      SMTP_HOST: smtp.example.com
+      SMTP_USERNAME: ci
+      SMTP_PASSWORD: ci
       RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v4
@@ -211,6 +217,12 @@ jobs:
       PORT: "8888"
       BASE_URL: http://127.0.0.1:8888
       RUST_LOG: info,tower_sessions=warn
+      # SMTP is required at boot (services/mail/smtp.rs builds the transport at
+      # startup via .expect on SMTP_HOST/USERNAME/PASSWORD). The smoke flow never
+      # sends mail, so dummy values are fine — lettre only connects on first send.
+      SMTP_HOST: smtp.example.com
+      SMTP_USERNAME: ci
+      SMTP_PASSWORD: ci
       RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v4

@@ -71,7 +71,7 @@ async fn seed_test_user() {
     if let Some(model) = existing {
         let mut am: user::ActiveModel = model.into();
         am.password = sea_orm::Set(Some(password_auth::generate_hash(&password)));
-        am.role = sea_orm::Set(UserRole::Admin);
+        am.role = sea_orm::Set(UserRole::SuperAdmin);
         am.is_verified = sea_orm::Set(true);
         am.update(&conn)
             .await
@@ -81,7 +81,7 @@ async fn seed_test_user() {
             name: email.clone(),
             email: email.clone(),
             password: password.clone(),
-            role: UserRole::Admin,
+            role: UserRole::SuperAdmin,
             avatar_id: None,
             is_verified: Some(true),
         };

@@ -322,7 +322,7 @@ async fn login_with_invalid_credentials_returns_unauthorized() {
         .post(format!("{}/auth/v1/log_in", base_url()))
         .header("csrf-token", token)
         .header("Content-Type", "application/json")
-        .json(&json!({"email": "nonexistent@test.com", "password": "wrong"}))
+        .json(&json!({"email": "nonexistent@test.com", "password": "wrong-password-12345"}))
         .send()
         .await
         .unwrap();
@@ -420,13 +420,7 @@ async fn search_with_query_returns_ok() {
     let client = client();
     skip_if_no_server!(client);
     let token = require_csrf(&client).await;
-    let resp = post_api(
-        &client,
-        "/search/v1/search",
-        json!({"query": "rust"}),
-        &token,
-    )
-    .await;
+    let resp = post_api(&client, "/search/v1/search", json!({"q": "rust"}), &token).await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
 

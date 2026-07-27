@@ -144,7 +144,7 @@ jobs:
         working-directory: backend/api
         run: |
           set -euo pipefail
-          cargo run --bin ruxlog --features full > /tmp/ruxlog-server.log 2>&1 &
+          cargo run --bin ruxlog --features full,seed-system > /tmp/ruxlog-server.log 2>&1 &
           SERVER_PID=$!
           trap '
             kill ${SERVER_PID} 2>/dev/null || true
@@ -274,7 +274,7 @@ jobs:
         working-directory: backend/api
         run: |
           set -euo pipefail
-          cargo run --bin ruxlog --features full > /tmp/ruxlog-server.log 2>&1 &
+          cargo run --bin ruxlog --features full,seed-system > /tmp/ruxlog-server.log 2>&1 &
           SERVER_PID=$!
           trap '
             kill ${SERVER_PID} 2>/dev/null || true

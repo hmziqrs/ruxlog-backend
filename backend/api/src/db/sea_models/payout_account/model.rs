@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub use ruxlog_types::enums::PayoutAccountStatus;
 
+use crate::error::{DbResult, ErrorCode, ErrorResponse};
 use crate::utils::field_crypto;
 
 /// Marker JSON object key for the encrypted envelope.
@@ -136,9 +137,7 @@ pub fn is_encrypted_envelope(value: &Json) -> bool {
 /// A malformed envelope (e.g. `enc` present but not decryptable) fails closed
 /// — it returns `Err` rather than returning the opaque blob, so a tampered row
 /// is never silently surfaced as if it were valid metadata.
-pub fn decrypt_metadata(
-    stored: &Option<Json>,
-) -> Result<Option<Json>, field_crypto::FieldCryptoError> {
+pub fn decrypt_metadata(stored: &Option<Json>) -> DbResult<Option<Json>> {
     let Some(value) = stored else {
         return Ok(None);
     };
@@ -149,9 +148,20 @@ pub fn decrypt_metadata(
             .get(ENC_KEY)
             .and_then(|v| v.as_str())
             .expect("is_encrypted_envelope guarantees a string `enc` value");
-        let plaintext_str = field_crypto::decrypt(ciphertext)?;
-        let plaintext_json: Json = serde_json::from_str(&plaintext_str)
-            .map_err(|_| field_crypto::FieldCryptoError::Decode)?;
+        // Crypto / decode failures on a stored envelope are server-side data
+        // integrity faults (wrong key, tampered ciphertext, malformed base64) —
+        // surface them as a 500 rather than the old opaque `FieldCryptoError`.
+        let plaintext_str = field_crypto::decrypt(ciphertext).map_err(|e| {
+            ErrorResponse::new(ErrorCode::InternalServerError)
+                .with_message("Payout metadata decryption failed")
+                .with_details(e.to_string())
+        })?;
+        // Issue #6: the serde error used to be discarded with `|_|`. Now that
+        // this function returns a `DbResult`, the `serde_json::Error` flows
+        // through the error layer (`From<serde_json::Error> for ErrorResponse`)
+        // and surfaces as a 400 `InvalidFormat` (parse errors carry a position)
+        // instead of being silently swallowed.
+        let plaintext_json: Json = serde_json::from_str(&plaintext_str)?;
         return Ok(Some(plaintext_json));
     }
 
@@ -169,7 +179,7 @@ impl Model {
     /// Decrypt this loaded row's `metadata` into the plaintext JSON. Convenience
     /// over [`decrypt_metadata`] for the common read path:
     /// `let meta = account.decrypted_metadata()?;`
-    pub fn decrypted_metadata(&self) -> Result<Option<Json>, field_crypto::FieldCryptoError> {
+    pub fn decrypted_metadata(&self) -> DbResult<Option<Json>> {
         decrypt_metadata(&self.metadata)
     }
 }
@@ -241,10 +251,11 @@ mod tests {
         chars[mid] = if chars[mid] == 'A' { 'B' } else { 'A' };
         envelope[ENC_KEY] = serde_json::Value::String(chars.into_iter().collect());
         let err = decrypt_metadata(&Some(envelope)).expect_err("tampered must fail closed");
-        assert!(matches!(
-            err,
-            field_crypto::FieldCryptoError::Decrypt | field_crypto::FieldCryptoError::Decode
-        ));
+        // The decrypt path now surfaces through the error layer: a tampered
+        // envelope fails AES-GCM authentication and is reported as a 500
+        // `InternalServerError` (rather than an opaque `FieldCryptoError`).
+        assert_eq!(err.code, crate::error::ErrorCode::InternalServerError);
+        assert_eq!(err.status, 500u16);
     }
 
     #[test]

@@ -9,6 +9,12 @@ use crate::services::auth::AuthBackend;
 #[cfg(feature = "billing")]
 use crate::services::billing::BillingRouter;
 
+// --- Optional service types for the issues batch (2026-07-27) ---
+#[cfg(feature = "image-moderation")]
+use crate::services::image_moderation::ImageModerator;
+#[cfg(feature = "notifications")]
+use rux_fcm::FcmClient;
+
 /// V-MED-10: build a single `reqwest::Client` with sane connect/request timeouts
 /// and connection pooling. A slow/hanging upstream no longer pins a handler
 /// thread indefinitely (CWE-400/CWE-770 handler-pool exhaustion DoS).
@@ -103,6 +109,13 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     #[cfg(feature = "billing")]
     pub billing_router: std::sync::Arc<BillingRouter>,
+    // --- Fields added for the issues batch (2026-07-27) ---
+    #[cfg(feature = "notifications")]
+    pub fcm: Option<std::sync::Arc<FcmClient>>,
+    #[cfg(feature = "auth-passkey")]
+    pub webauthn: Option<std::sync::Arc<crate::services::webauthn::WebauthnService>>,
+    #[cfg(feature = "image-moderation")]
+    pub image_moderator: Option<std::sync::Arc<dyn ImageModerator + Send + Sync>>,
 }
 
 impl FromRef<AppState> for AuthBackend {

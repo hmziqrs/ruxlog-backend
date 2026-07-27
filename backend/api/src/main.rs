@@ -386,6 +386,101 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::sync::Arc::new(BillingRouter::new(providers, geo_router))
     };
 
+    // ── Service construction added for the issues batch (2026-07-27) ──
+    // #29 Firebase Cloud Messaging (in-app/push). Stays None unless
+    // FCM_ENABLED + a service-account JSON are present; in-app rows still persist.
+    #[cfg(feature = "notifications")]
+    let fcm: Option<std::sync::Arc<rux_fcm::FcmClient>> = {
+        if env_bool("FCM_ENABLED", false) {
+            let project_id = env::var("FCM_PROJECT_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty());
+            let sa_path = env::var("FCM_SERVICE_ACCOUNT_PATH")
+                .ok()
+                .filter(|s| !s.trim().is_empty());
+            match (project_id, sa_path) {
+                (Some(pid), Some(path)) => match rux_fcm::ServiceAccount::from_path(&path) {
+                    Ok(sa) => Some(std::sync::Arc::new(rux_fcm::FcmClient::new(
+                        sa,
+                        pid,
+                        http_client.clone(),
+                    ))),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "FCM service-account load failed; push disabled \
+                             (in-app notifications still work)"
+                        );
+                        None
+                    }
+                },
+                _ => {
+                    tracing::warn!(
+                        "FCM_ENABLED=true but FCM_PROJECT_ID or FCM_SERVICE_ACCOUNT_PATH \
+                         not set; push disabled"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    // #4 passkey/WebAuthn service.
+    #[cfg(feature = "auth-passkey")]
+    let webauthn_service: Option<std::sync::Arc<ruxlog::services::webauthn::WebauthnService>> =
+        match ruxlog::services::webauthn::WebauthnService::from_env() {
+            Ok(svc) => {
+                tracing::info!("WebAuthn passkey service enabled");
+                Some(std::sync::Arc::new(svc))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "WebAuthn passkey service disabled (invalid configuration; passkey endpoints will return 503)"
+                );
+                None
+            }
+        };
+
+    // #9 image moderation gate (HttpModerator hits a configurable provider).
+    #[cfg(feature = "image-moderation")]
+    let image_moderator: Option<
+        std::sync::Arc<dyn ruxlog::services::image_moderation::ImageModerator + Send + Sync>,
+    > = {
+        use ruxlog::services::image_moderation::{HttpModerator, ImageModerator};
+        let enabled = env_bool("IMAGE_MODERATION_ENABLED", false);
+        let url = env_with_fallback(&["IMAGE_MODERATION_URL"], None);
+        let api_key = env_with_fallback(&["IMAGE_MODERATION_API_KEY"], None).unwrap_or_default();
+        if enabled {
+            match url {
+                Some(url) if !url.trim().is_empty() => {
+                    tracing::info!(url = %url, "Image moderation enabled (HttpModerator)");
+                    Some(
+                        std::sync::Arc::new(HttpModerator::new(http_client.clone(), url, api_key))
+                            as std::sync::Arc<dyn ImageModerator + Send + Sync>,
+                    )
+                }
+                _ => {
+                    tracing::warn!(
+                        "IMAGE_MODERATION_ENABLED=true but IMAGE_MODERATION_URL is unset/empty; \
+                         moderation disabled and uploads will be accepted unmoderated"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    // #5/#10 install the shared redis pool into the cache service's process-global slot.
+    #[cfg(feature = "cache")]
+    {
+        ruxlog::services::cache::install_pool(redis_pool.clone());
+    }
+
     let state = AppState {
         sea_db,
         redis_pool: redis_pool.clone(),
@@ -400,6 +495,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_client,
         #[cfg(feature = "billing")]
         billing_router,
+        // --- Fields added for the issues batch (2026-07-27) ---
+        #[cfg(feature = "notifications")]
+        fcm,
+        #[cfg(feature = "auth-passkey")]
+        webauthn: webauthn_service,
+        #[cfg(feature = "image-moderation")]
+        image_moderator,
     };
 
     // Bootstrap application constants from environment (only fills missing keys) and warm Redis.

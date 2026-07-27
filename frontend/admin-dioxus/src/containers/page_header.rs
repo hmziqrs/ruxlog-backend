@@ -195,7 +195,7 @@ pub fn PageHeader(props: PageHeaderProps) -> Element {
             vec![("import/export".to_string(), None)]
         }
 
-        Route::HomeScreen {} | Route::LoginScreen {} => vec![],
+        Route::HomeScreen {} | Route::LoginScreen {} | Route::ForgotPasswordScreen {} => vec![],
     };
 
     let container_class = props

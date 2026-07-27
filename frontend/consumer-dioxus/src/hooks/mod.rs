@@ -1,6 +1,7 @@
 pub use oxform::{OxForm, OxFormModel};
 
 pub mod categories;
+pub mod device_registration;
 pub mod posts;
 pub mod tags;
 

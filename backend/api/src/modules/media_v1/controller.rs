@@ -279,6 +279,54 @@ pub async fn create(
 
     tracing::Span::current().record("is_duplicate", false);
 
+    // ── image-moderation (issue #9): classify the uploaded image BEFORE it is
+    // persisted to S3. The gate is a no-op unless the `image-moderation` feature
+    // is compiled in AND a provider is configured on AppState
+    // (`IMAGE_MODERATION_ENABLED=true` + `IMAGE_MODERATION_URL`). When a
+    // provider is configured and returns `safe: false`, the upload is rejected
+    // with `OperationNotAllowed` (403) before any bytes reach object storage.
+    //
+    // Fail-open policy: if the configured provider is unreachable or returns a
+    // malformed response, the upload is ALLOWED and the error is logged. This
+    // keeps the upload pipeline available during a moderation-provider outage;
+    // an operator who prefers fail-closed can move this `Err` branch to a
+    // rejection. Mirrors the graceful-degradation used for FCM (missing config
+    // skips push rather than blocking notifications). When the feature is on but
+    // no provider is configured (`state.image_moderator` is None), the block is
+    // skipped entirely and uploads behave as the NoOp default.
+    #[cfg(feature = "image-moderation")]
+    if let Some(moderator) = state.image_moderator.as_ref() {
+        match moderator.classify(&file_bytes, &declared_mime).await {
+            Ok(verdict) => {
+                if !verdict.safe {
+                    warn!(
+                        user_id = uploader.id,
+                        content_hash = %content_hash,
+                        scores = ?verdict.scores,
+                        "Upload rejected by image moderation"
+                    );
+                    return Err(ErrorResponse::new(ErrorCode::OperationNotAllowed)
+                        .with_message("Image rejected by moderation")
+                        .with_details(
+                            "The uploaded image was flagged as unsafe by the moderation provider",
+                        ));
+                }
+                debug!(
+                    user_id = uploader.id,
+                    scores = ?verdict.scores,
+                    "Upload passed image moderation"
+                );
+            }
+            Err(err) => {
+                error!(
+                    user_id = uploader.id,
+                    error = %err,
+                    "Image moderation provider error; failing open (upload allowed)"
+                );
+            }
+        }
+    }
+
     // Derive useful metadata if it was not supplied
     if metadata.width.is_none() || metadata.height.is_none() {
         if let Ok(dimensions) = imagesize::blob_size(&file_bytes) {

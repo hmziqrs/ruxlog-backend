@@ -11,6 +11,18 @@ use oxui::components::form::input::AppInput;
 use oxui::shadcn::button::Button;
 use ruxlog_shared::store::use_auth;
 
+/// Build the backend OAuth start URL for a provider. The OAuth flow is a
+/// full-page browser redirect (the backend owns the round-trip), so these are
+/// plain anchor `href`s — no fetch/CSRF needed. Only providers enabled
+/// server-side (auth-oauth) will answer; the SPA just offers the entry points.
+fn oauth_login_url(provider: &str) -> String {
+    format!(
+        "{}/auth/{}/v1/login",
+        crate::env::APP_API_URL.trim_end_matches('/'),
+        provider
+    )
+}
+
 #[component]
 pub fn LoginScreen() -> Element {
     let mut ox_form = use_login_form(LoginForm::dev());
@@ -113,9 +125,9 @@ pub fn LoginScreen() -> Element {
                                 }
                             }
                             div { class: "flex justify-end text-xs text-zinc-600 dark:text-zinc-400 transition-colors duration-300",
-                                a {
+                                Link {
+                                    to: crate::router::Route::ForgotPasswordScreen {},
                                     class: "hover:underline text-zinc-700 dark:text-zinc-300 font-medium hover:text-zinc-900 dark:hover:text-white transition-colors duration-150",
-                                    href: "#",
                                     "Forgot password?"
                                 }
                             }
@@ -138,6 +150,36 @@ pub fn LoginScreen() -> Element {
                                     div { class: "loading loading-spinner loading-xs" }
                                 }
                                 span { "Login" }
+                            }
+                            // Third-party Sign-in (issue #13). Anchor links →
+                            // backend OAuth start URL; the backend performs the
+                            // provider round-trip and establishes a session.
+                            div { class: "relative my-4",
+                                div { class: "absolute inset-0 flex items-center",
+                                    span { class: "w-full border-t border-zinc-300 dark:border-zinc-700" }
+                                }
+                                div { class: "relative flex justify-center",
+                                    span { class: "bg-white dark:bg-zinc-900 px-2 text-xs text-zinc-500",
+                                        "or continue with"
+                                    }
+                                }
+                            }
+                            div { class: "grid grid-cols-3 gap-2",
+                                a {
+                                    class: "flex items-center justify-center rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors",
+                                    href: oauth_login_url("facebook"),
+                                    "Facebook"
+                                }
+                                a {
+                                    class: "flex items-center justify-center rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors",
+                                    href: oauth_login_url("github"),
+                                    "GitHub"
+                                }
+                                a {
+                                    class: "flex items-center justify-center rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors",
+                                    href: oauth_login_url("apple"),
+                                    "Apple"
+                                }
                             }
                         }
                     }

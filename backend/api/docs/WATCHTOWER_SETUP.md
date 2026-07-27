@@ -2,7 +2,7 @@
 
 This guide walks you through enabling zero-SSH deployments using Watchtower. With Watchtower running on your VPS, new images pushed to your public registry (GHCR) will be pulled automatically and your containers will be restarted safely.
 
-Our repo already ships a Watchtower service in `docker-compose.prod.yml` and labels the `backend` for safe updates. Follow the steps below to finish the setup.
+Our repo already ships a Watchtower service in `backend/docker/docker-compose.prod.yml` and labels the `backend` for safe updates. Follow the steps below to finish the setup.
 
 ## What Watchtower does
 
@@ -20,7 +20,7 @@ Our repo already ships a Watchtower service in `docker-compose.prod.yml` and lab
 
 ## Step 1 — Confirm labels and service
 
-- `backend` is already labeled in `docker-compose.prod.yml`:
+- `backend` is already labeled in `backend/docker/docker-compose.prod.yml`:
   - `com.centurylinklabs.watchtower.enable=true`
 - A `watchtower` service is included with:
   - `--label-enable` (only update labeled containers)
@@ -36,8 +36,8 @@ No YAML edits are required—these are already in the repository.
 
 Ensure the following files exist on the VPS in your app directory (e.g., `/opt/ruxlog`):
 
-- `deploy.env` — compose interpolation vars used by labels/Traefik (see `docs/DEPLOY_STEPS.md`).
-- `.env.prod` — your production secrets used by the containers.
+- `backend/docker/deploy.env` — compose interpolation vars + backend runtime secrets (copy from `backend/docker/deploy.env.example`; see `docs/DEPLOY_STEPS.md`).
+- `backend/traefik/.env.prod` — Traefik ACME config (set `ACME_EMAIL`).
 
 There is no webhook or external API exposure in this setup; Watchtower will simply poll every 5 minutes and update labeled containers when a new image tag is available.
 
@@ -47,7 +47,8 @@ Bring up (or bounce) only the Watchtower service:
 
 ```bash
 # From your app directory on the VPS
-docker compose --env-file deploy.env -f docker-compose.prod.yml up -d watchtower
+docker compose --env-file backend/docker/deploy.env \
+  -f backend/docker/docker-compose.prod.yml up -d watchtower
 ```
 
 Verify logs:
@@ -90,6 +91,6 @@ There’s nothing else to configure beyond tagging releases (`vX.Y.Z`). The CI b
 
 ## Reference
 
-- Compose file: `docker-compose.prod.yml` (backend label + watchtower service)
+- Compose file: `backend/docker/docker-compose.prod.yml` (backend label + watchtower service)
 - Main deployment steps: `docs/DEPLOY_STEPS.md`
 - Watchtower image: https://github.com/containrrr/watchtower

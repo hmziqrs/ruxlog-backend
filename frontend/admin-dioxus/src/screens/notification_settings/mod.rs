@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use ruxlog_shared::use_notification;
 
 use crate::containers::page_header::PageHeader;
 use oxui::shadcn::button::{Button, ButtonVariant};
@@ -7,7 +8,32 @@ use oxui::shadcn::checkbox::Checkbox;
 
 #[component]
 pub fn NotificationSettingsScreen() -> Element {
-    // Toggle states for each email notification event
+    // In-app notification store — powers the live unread count for the In-App
+    // channel indicator and the "Save Configuration" acknowledge action.
+    let notifications = use_notification();
+
+    // Pull the real unread count on mount so the In-App channel badge is live.
+    use_effect(move || {
+        let notifications = use_notification();
+        spawn(async move {
+            notifications.unread_count().await;
+        });
+    });
+
+    // Live unread count (reactive read of the store).
+    let unread_count: u64 = notifications
+        .unread_count
+        .read()
+        .data
+        .as_ref()
+        .map(|u| u.count)
+        .unwrap_or(0);
+    let unread_loading = notifications.unread_count.read().is_loading();
+
+    // NOTE: the per-event toggles below (new comment, new user, payment, etc.)
+    // have NO backend notification-preference endpoint yet, so they remain
+    // local UI state only. Persisting them server-side is a follow-up — until
+    // then they reflect the operator's intent but are not saved anywhere.
     let mut new_comment = use_signal(|| true);
     let mut new_user = use_signal(|| true);
     let mut payment_received = use_signal(|| true);
@@ -15,13 +41,37 @@ pub fn NotificationSettingsScreen() -> Element {
     let mut newsletter_subscriber = use_signal(|| false);
     let mut contact_form = use_signal(|| true);
 
-    // Channel toggles
+    // Channel toggles. `channel_email`/`channel_webhook` are local preference
+    // state (no backend endpoint). `channel_in_app` is derived from the real
+    // unread state — see the In-App row below.
     let mut channel_email = use_signal(|| true);
-    let mut channel_in_app = use_signal(|| false);
     let mut channel_webhook = use_signal(|| false);
 
     // Webhook URL
     let mut webhook_url = use_signal(String::new);
+
+    // "Save Configuration" acknowledges all in-app notifications via the
+    // matching `notification_v1` endpoint (mark_all_read) and refreshes the
+    // badge. This is the only notification_v1 write that maps to this screen;
+    // the event-type preferences above have no backend persistence yet.
+    let on_save_configuration = move |_: MouseEvent| {
+        let notifications = use_notification();
+        spawn(async move {
+            notifications.mark_all_read().await;
+            notifications.unread_count().await;
+        });
+    };
+
+    // Unchecking the In-App toggle clears all unread notifications.
+    let on_in_app_toggle = move |checked: bool| {
+        if !checked {
+            let notifications = use_notification();
+            spawn(async move {
+                notifications.mark_all_read().await;
+                notifications.unread_count().await;
+            });
+        }
+    };
 
     rsx! {
         div { class: "min-h-screen bg-transparent text-foreground",
@@ -152,13 +202,22 @@ pub fn NotificationSettingsScreen() -> Element {
                             }
                         }
 
-                        // In-app channel
+                        // In-app channel — live (no longer "Coming Soon"). The
+                        // checkbox reflects real unread state from the store:
+                        // it's checked while there are pending notifications,
+                        // and unchecking it marks them all read.
                         div { class: "flex items-center justify-between py-4",
                             div { class: "space-y-0.5 pr-4",
                                 div { class: "flex items-center gap-2",
                                     p { class: "text-sm font-medium", "In-App" }
                                     span { class: "text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground font-medium",
-                                        "Coming Soon"
+                                        if unread_loading {
+                                            "…"
+                                        } else if unread_count > 0 {
+                                            "{unread_count} unread"
+                                        } else {
+                                            "All read"
+                                        }
                                     }
                                 }
                                 p { class: "text-xs text-muted-foreground",
@@ -166,9 +225,8 @@ pub fn NotificationSettingsScreen() -> Element {
                                 }
                             }
                             Checkbox {
-                                checked: *channel_in_app.read(),
-                                disabled: true,
-                                onchange: move |checked| channel_in_app.set(checked),
+                                checked: unread_count > 0,
+                                onchange: move |checked| on_in_app_toggle(checked),
                             }
                         }
 
@@ -220,7 +278,10 @@ pub fn NotificationSettingsScreen() -> Element {
                             }
                             Button {
                                 variant: ButtonVariant::Default,
-                                disabled: webhook_url.read().is_empty(),
+                                onclick: on_save_configuration,
+                                // The webhook URL field has no backend endpoint
+                                // yet, so don't gate the (working) notification
+                                // acknowledge action on it being filled.
                                 "Save Configuration"
                             }
                         }

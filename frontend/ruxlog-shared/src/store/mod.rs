@@ -9,6 +9,7 @@ pub mod auth;
 pub mod billing;
 pub mod categories;
 pub mod comments;
+pub mod device;
 pub mod email_verification;
 #[cfg(feature = "image-editor")]
 pub mod image_editor;
@@ -16,6 +17,8 @@ pub mod likes;
 pub mod media;
 #[cfg(feature = "newsletter-store")]
 pub mod newsletter;
+pub mod notification;
+pub mod passkey;
 pub mod password_reset;
 pub mod posts;
 pub mod tags;
@@ -33,6 +36,7 @@ pub use auth::*;
 pub use billing::*;
 pub use categories::*;
 pub use comments::*;
+pub use device::*;
 pub use email_verification::*;
 #[cfg(feature = "image-editor")]
 pub use image_editor::*;
@@ -40,6 +44,8 @@ pub use likes::*;
 pub use media::*;
 #[cfg(feature = "newsletter-store")]
 pub use newsletter::*;
+pub use notification::*;
+pub use passkey::*;
 pub use password_reset::*;
 pub use posts::*;
 pub use tags::*;

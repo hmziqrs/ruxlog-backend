@@ -1,106 +1,150 @@
 # Production Deployment Steps
 
-Follow these commands from the repository root the first time you bring the stack online. Replace placeholder domains and secrets with your real values.
+This guide brings up the full production stack: the backend API image from GHCR,
+Postgres, Valkey, and Watchtower for zero-SSH auto-updates. The Traefik edge
+proxy is a separate compose project that owns the shared external network and
+TLS termination.
+
+> Files for issue #48 (GHCR publish + prod compose + Watchtower):
+> - `backend/docker/docker-compose.prod.yml` — the full app stack
+> - `backend/docker/deploy.env.example` — copy to `deploy.env` and fill in
+> - `.github/workflows/publish-image.yml` — builds/pushes the image on `v*` tags
+> - `backend/api/docs/DEPLOY_STEPS.md` + `WATCHTOWER_SETUP.md` — this guide
+
+## 0. Prerequisites on the VPS
+
+- Docker + Docker Compose plugin (`docker compose version`).
+- A non-root user with access to the Docker daemon.
+- The repo checked out at `/opt/ruxlog` (or similar) — the prod compose and
+  `deploy.env` are read from disk; secrets never live in CI.
+
+## 1. Backend environment
 
 ```bash
-# 1. Base application environment
-cp .env.example .env
-# Edit .env with database, Redis, SMTP, and secret values
+cd /opt/ruxlog/backend/docker
+cp deploy.env.example deploy.env
+# Edit deploy.env: set PROJECT, BACKEND_IMAGE, BACKEND_DOMAIN, ACME_EMAIL, and
+# real DB/Redis/SMTP/S3/FCM credentials. HOST/PORT are forced by compose and
+# must NOT be set here.
+```
 
-# 2. Traefik environment (ACME email + project slug)
-cp traefik/.env.prod.example traefik/.env.prod
-# Edit traefik/.env.prod and set ACME_EMAIL plus any overrides
+`deploy.env` is used two ways at once: (a) compose interpolation for `${VAR}`
+references in `docker-compose.prod.yml`, and (b) the backend container's
+runtime env (the service lists it under `env_file`). So every stack command
+must pass `--env-file deploy.env`.
 
-# 3. Compose interpolation variables for labels and rate limits
-cat > deploy.env <<'EOF_ENV'
-PROJECT=ruxlog
-BACKEND_DOMAIN=api.example.com
-BACKEND_RATE_AVG=10
-BACKEND_RATE_BURST=20
-EOF_ENV
+## 2. Traefik edge proxy (bring up first)
 
-# 4. Start backend dependencies and API (creates the shared network)
-docker compose --env-file deploy.env -f docker-compose.prod.yml up -d
+The Traefik stack creates the `${PROJECT}_network` that the app stack joins as
+external, and terminates TLS using the file-provider router/middlewares defined
+in `backend/traefik/dynamic/traefik-dynamic.yml`. Do NOT redefine them in the
+app stack — it reuses `secure-transport-headers@file` / `spa-csp-headers@file`
+and routes via the `api-spa-secure` router whose `api-backend` load-balancer
+target is `http://api:8888`.
 
-# 5. Prepare Traefik's ACME storage directory
-mkdir -p traefik/data
-touch traefik/data/acme.json
-chmod 600 traefik/data/acme.json
+```bash
+cd /opt/ruxlog/backend/traefik
+cp .env.prod.example .env.prod      # set ACME_EMAIL
+mkdir -p data && touch data/acme.json && chmod 600 data/acme.json
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+```
 
-# 6. Launch Traefik with automatic Let's Encrypt certificates
-docker compose --env-file traefik/.env.prod -f traefik/docker-compose.prod.yml up -d
+## 3. Database migrations
 
-# 7. Inspect proxy logs (ACME + routing) and test HTTPS endpoint
-docker logs ruxlog_traefik
-curl -I https://api.example.com/healthz
+The prod image (`backend/docker/Dockerfile.api`) ships only the `ruxlog` API
+binary — it has no embedded migrator and no `migrate` subcommand. The
+sea-orm-migration CLI lives in the `migration` crate (binary `migrate`,
+`backend/api/migration/src/main.rs`).
+
+**Recommended (interim, no image change):** build the migrator on the host from
+the repo checkout and run it against the prod database. From the host (outside
+the compose network) use the host-side address of Postgres — e.g. publish the
+port or point at the VPS private IP:
+
+```bash
+cd /opt/ruxlog/backend/api
+DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@<postgres-host>:5432/${POSTGRES_DB}" \
+  cargo run -p migration --bin migrate -- up
+```
+
+Sanity-check connectivity first:
+
+```bash
+docker exec -i ${PROJECT}_postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "SELECT 1"
+```
+
+**Follow-up (cleaner):** extend `Dockerfile.api` to also copy the `migrate`
+binary (`COPY --from=builder /workspace/api/target/release/migrate /app/migrate`),
+then run it as a one-shot against the live stack:
+
+```bash
+docker compose --env-file deploy.env -f backend/docker/docker-compose.prod.yml \
+  run --rm backend /app/migrate up
+```
+
+The sea-orm CLI accepts `up`, `down`, `fresh`, `status`. Run `up` before
+starting a newly versioned backend for the first time, and after pulling any
+image whose release notes mention a schema change.
+
+## 4. Bring up the application stack
+
+```bash
+cd /opt/ruxlog
+docker compose --env-file backend/docker/deploy.env \
+  -f backend/docker/docker-compose.prod.yml up -d
+```
+
+Verify:
+
+```bash
+docker compose --env-file backend/docker/deploy.env \
+  -f backend/docker/docker-compose.prod.yml ps
+curl -I https://api.example.com/healthz     # through Traefik
+docker logs ${PROJECT}_backend
+```
+
+## 5. CI/CD with GitHub Actions
+
+The workflow at `.github/workflows/publish-image.yml` builds and pushes the
+image to GHCR. On push of a version tag (e.g. `v1.2.3`):
+
+1. Build & push image with tags:
+   - `ghcr.io/<owner>/<repo>:v1.2.3` (full tag)
+   - `ghcr.io/<owner>/<repo>:1.2.3` (raw semver)
+   - `ghcr.io/<owner>/<repo>:latest` (only for stable `x.y.z`)
+2. The VPS auto-detects and rolls out via Watchtower polling (no SSH, no
+   webhooks). See `WATCHTOWER_SETUP.md`.
+
+Build context is `./backend` and the Dockerfile is `backend/docker/Dockerfile.api`
+(the correct paths; the old misplaced `backend/api/.github/workflows/cicd.yml`
+used `context: .` + `file: Dockerfile` from the wrong directory and has been
+removed). Feature flags are NOT overridden by the workflow — the image is built
+exactly as `Dockerfile.api` decides.
+
+**Secrets:** none beyond the automatically-provided `GITHUB_TOKEN`
+(`packages: write`). Images publish to a GHCR package; if it is private, run
+`docker login ghcr.io` on the VPS with a PAT that has `read:packages`.
+
+**Manual run:** from the Actions tab use "Run workflow" and set `version` to a
+tag (e.g. `v1.2.3`) to rebuild/redeploy that exact version.
+
+**Pre-releases:** tags that don't match strict `x.y.z` (e.g. `v1.2.3-rc.1`)
+publish `v1.2.3-rc.1` + `1.2.3-rc.1` but do NOT move `latest`.
+
+**Rollback:** pin `BACKEND_IMAGE` to a prior tag and bounce the backend (run
+`... migrate down` or restore from backup first if the rollback crosses a
+migration):
+
+```bash
+BACKEND_IMAGE=ghcr.io/<owner>/<repo>:v1.2.2 \
+  docker compose --env-file backend/docker/deploy.env \
+  -f backend/docker/docker-compose.prod.yml up -d backend
 ```
 
 ## Optional: Local Label-Based Routing
+
 ```bash
-docker compose --env-file deploy.env -f traefik/docker-compose.dev.yml up -d
+docker compose --env-file backend/docker/deploy.env \
+  -f backend/traefik/docker-compose.dev.yml up -d
 # Traefik now serves backend.localhost → backend container
-```
-
-## Automated CI/CD with GitHub Actions
-
-This repo includes a workflow at `.github/workflows/cicd.yml` that:
-
-- Builds and pushes a container image to GHCR when you push a Git tag like `v1.2.3`.
-- Deployment is handled by Watchtower polling on your VPS (no SSH, no webhooks).
-
-### Prerequisites on the VPS
-
-- Docker and Docker Compose Plugin installed (`docker compose version`).
-- A non-root user with passwordless sudo or access to the Docker daemon.
-- A directory for the app, for example `/opt/ruxlog`, containing:
-	- `docker-compose.prod.yml` (place the repo files on the server, e.g. via git clone or scp)
-	- `.env.prod` (your production secrets; never stored in CI)
-	- `deploy.env` (compose interpolation variables used by labels and Traefik)
-	- `docker/redis/prod.acl`
-- Traefik stack running (see steps above) and sharing the `${PROJECT}_network`.
-
-Images are published to a public GHCR package, so no registry login is required on the VPS.
-
-### GitHub Repository Secrets
-
-No additional secrets are required for building and pushing images (the workflow uses `GITHUB_TOKEN`).
-
-### How it works
-
-On push of a version tag (e.g., `v1.2.3`):
-
-1. Build & push image with tags:
-	- `ghcr.io/<owner>/<repo>:v1.2.3` (full tag)
-	- `ghcr.io/<owner>/<repo>:1.2.3` (raw semver)
-	- `ghcr.io/<owner>/<repo>:latest` (only for stable semver x.y.z)
-2. Your VPS auto-detects and rolls out the update via Watchtower polling.
-
-### Default: SSH-less auto-deploy (Watchtower)
-
-You can avoid SSH entirely and let the server auto-update containers when new images are available:
-
-- The compose file includes a `watchtower` service that checks for new images every 5 minutes and restarts only containers labeled with `com.centurylinklabs.watchtower.enable=true` (already set on `backend`).
-- Watchtower will pick up new images on its polling interval (5 minutes by default); no webhooks or SSH are used.
-
-For a step-by-step Watchtower setup guide, see `docs/WATCHTOWER_SETUP.md`.
-
-### Optional: SSH-based deploy (legacy)
-
-If you prefer explicit SSH-driven deployments (to run DB migrations, coordinated multi-service changes, or custom health gates), we can keep a separate workflow that connects to your VPS and runs `docker compose up -d backend`. The default pipeline no longer uses SSH.
-
-### Manual run
-
-From the Actions tab, use “Run workflow” and set `version` to a tag (e.g. `v1.2.3`) if you want to rebuild/redeploy that exact version.
-
-### Pre-releases
-
-If you push a tag that doesn’t match strict `x.y.z` (like `v1.2.3-rc.1`), images are pushed with `v1.2.3-rc.1` and `1.2.3-rc.1` tags, but `latest` is not updated.
-
-### Rollback
-
-To rollback, re-run the workflow with a previous tag (use the SHA from the prior successful run) or update `BACKEND_IMAGE` on the server and run compose:
-
-```bash
-BACKEND_IMAGE=ghcr.io/<owner>/<repo>:<tag> IMAGE_TAG=<tag> \
-	docker compose --env-file deploy.env -f docker-compose.prod.yml up -d backend
 ```

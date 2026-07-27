@@ -3,6 +3,7 @@ members = [
     "crates/ruxlog-types",
     "backend/api",
     "backend/api/crates/rux-auth",
+    "backend/api/crates/rux-fcm",
     "backend/api/migration",
     "frontend/oxcore",
     "frontend/oxstore",

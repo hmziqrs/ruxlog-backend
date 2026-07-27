@@ -7,7 +7,7 @@ use crate::screens::{
 use dioxus::prelude::*;
 
 #[cfg(feature = "consumer-auth")]
-use crate::screens::{LoginScreen, RegisterScreen};
+use crate::screens::{ForgotPasswordScreen, LoginScreen, RegisterScreen};
 
 #[cfg(feature = "profile-management")]
 use crate::screens::{ProfileEditScreen, ProfileScreen};
@@ -37,6 +37,10 @@ pub enum Route {
     #[cfg(feature = "consumer-auth")]
     #[route("/login")]
     LoginScreen {},
+
+    #[cfg(feature = "consumer-auth")]
+    #[route("/forgot-password")]
+    ForgotPasswordScreen {},
 
     #[cfg(feature = "consumer-auth")]
     #[route("/register")]

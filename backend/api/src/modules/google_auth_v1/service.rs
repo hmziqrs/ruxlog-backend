@@ -331,6 +331,32 @@ fn verify_id_token_with_keys(
 }
 
 async fn fetch_google_jwks() -> Result<Vec<GoogleJwkKey>, ErrorResponse> {
+    // #5 3rd-party API caching (feature-gated). The shared redis cache sits in
+    // FRONT of the in-process cache so a cold process (or a fresh replica)
+    // serves Google's JWKS without hitting `.googleapis.com`. The R-5
+    // bypass-cache re-fetch path (`fetch_google_jwks_bypass_cache`) stays
+    // HTTP-only — a forced rotation refresh must not read a potentially-stale
+    // redis entry — but it DOES refresh redis on success. Fail-open: a redis
+    // miss/error falls through to the in-process cache / HTTP, never errors.
+    #[cfg(feature = "cache")]
+    {
+        let pool = crate::services::cache::global_pool();
+        if let Some(pool) = pool {
+            let key = crate::services::cache::CacheKey::jwks("google");
+            match crate::services::cache::get::<String>(pool, &key).await {
+                Ok(Some(raw)) => match serde_json::from_str::<GoogleJwkSet>(&raw) {
+                    Ok(set) => {
+                        tracing::debug!("google JWKS served from redis cache");
+                        return Ok(set.keys);
+                    }
+                    Err(e) => warn!(error = ?e, "cached JWKS parse failed; refetching"),
+                },
+                Ok(None) => {}
+                Err(e) => warn!(error = %e, "JWKS redis cache get failed (non-fatal)"),
+            }
+        }
+    }
+
     // Fast path: serve from cache if fresh.
     {
         let guard = JWKS_CACHE.read().await;
@@ -397,6 +423,23 @@ async fn fetch_google_jwks_bypass_cache() -> Result<Vec<GoogleJwkKey>, ErrorResp
         fetched_at: SystemTime::now(),
         keys: keys.clone(),
     });
+
+    // #5 refresh the shared redis cache with the freshly-fetched payload so the
+    // fast path (and other replicas) can serve it. Best-effort: a redis blip
+    // only logs — the in-process cache above is already populated.
+    #[cfg(feature = "cache")]
+    {
+        if let Some(pool) = crate::services::cache::global_pool() {
+            let raw = String::from_utf8_lossy(bytes.as_ref()).to_string();
+            let key = crate::services::cache::CacheKey::jwks("google");
+            if let Err(e) =
+                crate::services::cache::set(pool, &key, &raw, crate::services::cache::API_TTL_SECS)
+                    .await
+            {
+                warn!(error = %e, "JWKS redis cache set failed (non-fatal)");
+            }
+        }
+    }
 
     Ok(keys)
 }

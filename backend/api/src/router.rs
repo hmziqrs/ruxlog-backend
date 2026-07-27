@@ -44,6 +44,16 @@ use crate::modules::seed_v1;
 #[cfg(feature = "billing")]
 use crate::modules::billing_v1;
 
+// --- Modules added for the issues batch (2026-07-27) ---
+#[cfg(feature = "cache")]
+use crate::modules::cache_v1;
+#[cfg(feature = "auth-passkey")]
+use crate::modules::passkey_v1;
+#[cfg(feature = "auth-oauth")]
+use crate::modules::{apple_auth_v1, facebook_auth_v1, github_auth_v1};
+#[cfg(feature = "notifications")]
+use crate::modules::{device_v1, notification_v1};
+
 use crate::utils::sanitize::xml_escape;
 
 use super::AppState;
@@ -150,6 +160,42 @@ pub fn router(state: AppState) -> Router<AppState> {
     #[cfg(feature = "billing")]
     {
         router = router.nest("/billing/v1", billing_v1::routes());
+    }
+
+    // --- Nests added for the issues batch (2026-07-27) ---
+    #[cfg(feature = "notifications")]
+    {
+        router = router
+            .nest(
+                "/device/v1",
+                device_v1::routes().layer(rate_limit::RateLimitLayer::new(state.clone(), 100, 60)),
+            )
+            .nest(
+                "/notification/v1",
+                notification_v1::routes().layer(rate_limit::RateLimitLayer::new(
+                    state.clone(),
+                    100,
+                    60,
+                )),
+            );
+    }
+
+    #[cfg(feature = "auth-passkey")]
+    {
+        router = router.nest("/passkey/v1", passkey_v1::routes());
+    }
+
+    #[cfg(feature = "auth-oauth")]
+    {
+        router = router
+            .nest("/auth/facebook/v1", facebook_auth_v1::routes())
+            .nest("/auth/github/v1", github_auth_v1::routes())
+            .nest("/auth/apple/v1", apple_auth_v1::routes());
+    }
+
+    #[cfg(feature = "cache")]
+    {
+        router = router.nest("/cache/v1", cache_v1::routes());
     }
 
     #[cfg(feature = "openapi")]

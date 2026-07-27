@@ -9,8 +9,8 @@ use crate::router::Route;
 use dioxus::prelude::*;
 use ruxlog_shared::{use_auth, AuthGuardError, AuthGuardLoader};
 
-/// Routes that don't require authentication (only login screen for admin)
-const OPEN_ROUTES: &[Route] = &[Route::LoginScreen {}];
+/// Routes that don't require authentication (login + forgot-password for admin)
+const OPEN_ROUTES: &[Route] = &[Route::LoginScreen {}, Route::ForgotPasswordScreen {}];
 
 #[component]
 pub fn AuthGuardContainer() -> Element {

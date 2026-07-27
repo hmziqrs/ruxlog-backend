@@ -288,6 +288,11 @@ impl Entity {
         let post: Option<Model> = Self::find_by_id(post_id).one(conn).await?;
 
         if let Some(post_model) = post {
+            // #10 capture the current slug BEFORE consuming `post_model` so the
+            // cache invalidation below can drop the old slug-keyed entry too.
+            #[cfg(feature = "cache")]
+            let old_slug: String = post_model.slug.clone();
+
             let mut post_active: ActiveModel = post_model.into();
 
             if let Some(title) = update_post.title {
@@ -340,6 +345,31 @@ impl Entity {
             match post_active.update(conn).await {
                 Ok(updated_post) => {
                     info!(post_id, "Post updated");
+
+                    // #10 invalidate the stale cache entries for this post. We
+                    // drop the id-keyed entry plus the old AND new slug entries
+                    // (a slug rename otherwise leaves the old-slug entry stale
+                    // until its 60s TTL). `find_by_id_or_slug` below re-populates
+                    // the id entry with the fresh row. Targeted DELs (no prefix
+                    // wipe) so a single edit does not stampede every other post's
+                    // cache. Best-effort: a redis blip only logs.
+                    #[cfg(feature = "cache")]
+                    {
+                        let new_slug = updated_post.slug.clone();
+                        if let Some(pool) = crate::services::cache::global_pool() {
+                            for token in [post_id.to_string(), old_slug, new_slug] {
+                                let key = crate::services::cache::CacheKey::post_view(&token);
+                                if let Err(e) = crate::services::cache::invalidate(pool, &key).await
+                                {
+                                    tracing::warn!(
+                                        error = %e, %key,
+                                        "post view cache invalidate failed (non-fatal)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     Self::find_by_id_or_slug(conn, public_url, Some(updated_post.id), None).await
                 }
                 Err(err) => {
@@ -362,6 +392,17 @@ impl Entity {
                     rows_affected = result.rows_affected,
                     "Post deleted"
                 );
+
+                // #10 drop the cached view entries for this post. The slug is
+                // not known here (delete is by id), so wipe the whole
+                // `post:view:*` prefix — deletes are rare, so the prefix wipe is
+                // cheap and guarantees no stale entry is served for a deleted
+                // post. Best-effort (logs on redis error).
+                #[cfg(feature = "cache")]
+                {
+                    crate::services::cache::invalidate_post_view_all().await;
+                }
+
                 Ok(result.rows_affected)
             }
             Err(err) => {
@@ -378,6 +419,36 @@ impl Entity {
         post_id: Option<i32>,
         post_slug: Option<String>,
     ) -> DbResult<Option<PostWithRelations>> {
+        // #10 read-through cache (feature-gated). The cache key is the input
+        // token (id or slug) so both lookup shapes share the `post:view:*`
+        // namespace. Cache stores the raw DB result; the controller-level status
+        // gate + paywall still apply per-request on the way out, so a cached
+        // Draft/gated post is never leaked to an unauthorized viewer. Fail-open:
+        // a redis miss/error falls through to the DB and only logs.
+        #[cfg(feature = "cache")]
+        let cache_token: Option<String> = match (post_id, post_slug.as_deref()) {
+            (Some(id), _) => Some(id.to_string()),
+            (_, Some(slug)) => Some(slug.to_string()),
+            _ => None,
+        };
+
+        #[cfg(feature = "cache")]
+        if let Some(token) = &cache_token {
+            if let Some(pool) = crate::services::cache::global_pool() {
+                let key = crate::services::cache::CacheKey::post_view(token);
+                match crate::services::cache::get::<PostWithRelations>(pool, &key).await {
+                    Ok(Some(cached)) => {
+                        tracing::debug!(key = %key, "post view cache hit");
+                        return Ok(Some(cached));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, key = %key, "post view cache get failed (non-fatal)")
+                    }
+                }
+            }
+        }
+
         let mut query = Self::build_post_query_with_relations(public_url);
 
         query = match (post_id, post_slug.clone()) {
@@ -406,7 +477,28 @@ impl Entity {
                 }
             }
 
-            return Ok(Some(post_data.into_relation(tags)));
+            let post = post_data.into_relation(tags);
+
+            // #10 populate cache on miss (best-effort). The raw DB result is
+            // cached; per-request paywall/status stripping happens downstream.
+            #[cfg(feature = "cache")]
+            if let Some(token) = &cache_token {
+                if let Some(pool) = crate::services::cache::global_pool() {
+                    let key = crate::services::cache::CacheKey::post_view(token);
+                    if let Err(e) = crate::services::cache::set(
+                        pool,
+                        &key,
+                        &post,
+                        crate::services::cache::POST_VIEW_TTL_SECS,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, key = %key, "post view cache set failed (non-fatal)");
+                    }
+                }
+            }
+
+            return Ok(Some(post));
         }
 
         Ok(None)

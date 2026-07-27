@@ -19,6 +19,11 @@ pub mod utils;
 #[cfg(feature = "analytics")]
 pub mod analytics;
 
+// WebAuthn / passkey browser glue (issue #4). Referenced by the consumer
+// login + profile screens, so gated under the auth feature that gates those.
+#[cfg(feature = "consumer-auth")]
+pub mod passkey;
+
 fn configure_http_client() {
     // Configure HTTP client base URL only. The per-session CSRF token is no
     // longer baked in at build time (plan Phase 5); it is fetched from

@@ -78,6 +78,9 @@ jobs:
       REDIS_PASSWORD: valkeypw
       # Session/cookie signing key (any non-empty string; not used for secrets
       # in the test flow). CSRF signing key is HKDF-derived from this.
+      # Mark this as a CI/test env so FIELD_ENC_KEY falls back to the documented
+      # non-secret dev default (state.rs derive_field_enc_key panics in "prod").
+      RUST_ENV: ci
       COOKIE_KEY: ci-cookie-key-0123456789abcdef0123456789abcdef0123456789abcdef
       # Object storage is required at startup but never exercised by the
       # read/login/post-create smoke flow, so dummy values are fine.
@@ -207,6 +210,9 @@ jobs:
       REDIS_PORT: "6379"
       REDIS_USER: default
       REDIS_PASSWORD: valkeypw
+      # Mark this as a CI/test env so FIELD_ENC_KEY falls back to the documented
+      # non-secret dev default (state.rs derive_field_enc_key panics in "prod").
+      RUST_ENV: ci
       COOKIE_KEY: ci-cookie-key-0123456789abcdef0123456789abcdef0123456789abcdef
       S3_BUCKET: ci-assets
       S3_ACCESS_KEY: ci-access-key

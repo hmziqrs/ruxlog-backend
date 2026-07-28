@@ -14,7 +14,7 @@ use tower_sessions_redis_store::RedisStore;
 use ruxlog::utils::cors::get_allowed_origins;
 use ruxlog::{
     db, middlewares, router,
-    services::{self, redis::init_redis_store},
+    services::redis::init_redis_store,
     state::{validate_cookie_key, AppState, ObjectStorageConfig},
     utils::telemetry,
 };
@@ -77,6 +77,111 @@ fn env_with_fallback(keys: &[&str], default: Option<&str>) -> Option<String> {
     default.map(|value| value.to_string())
 }
 
+fn parse_env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+/// Build the [`MailRouter`] from `MAIL_PROVIDER` + provider-specific env. The
+/// selected provider's required env is read with `expect` (fail-loud boot) so a
+/// misconfigured provider is caught at startup, not on the first send. `mailer`
+/// is an `Arc<MailRouter>` (non-Option): mail is unconditional, and a selected
+/// provider without its creds must fail loud rather than silently no-op every
+/// send.
+async fn build_mail_router(
+    db: sea_orm::DatabaseConnection,
+    redis_pool: tower_sessions_redis_store::fred::prelude::Pool,
+    http_client: reqwest::Client,
+) -> std::sync::Arc<ruxlog::services::mail::MailRouter> {
+    use ruxlog::services::mail::{router::MailRouterLimits, smtp::SmtpMailProvider};
+    use ruxlog::services::mail::{MailProvider, MailRouter};
+    use std::collections::HashMap;
+
+    let selected = env::var("MAIL_PROVIDER").unwrap_or_else(|_| "smtp".to_string());
+    let rate_limit_enabled = env_bool("MAIL_RATE_LIMIT_ENABLED", true);
+    let limits = MailRouterLimits {
+        dedup_ttl_secs: parse_env_u64("MAIL_DEDUP_TTL_SECS", 300) as usize,
+        soft_cooldown_secs: parse_env_u64("MAIL_SOFT_BOUNCE_COOLDOWN_SECS", 86_400) as i64,
+        ..MailRouterLimits::default()
+    };
+    let from_address =
+        env::var("MAIL_FROM_ADDRESS").unwrap_or_else(|_| "no-reply@domain.tld".to_string());
+    let from_name = env::var("MAIL_FROM_NAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut providers: HashMap<String, std::sync::Arc<dyn MailProvider>> = HashMap::new();
+    let default = match selected.as_str() {
+        "cloudflare" => {
+            #[cfg(feature = "mail-cloudflare")]
+            {
+                use ruxlog::services::mail::cloudflare::CloudflareMailProvider;
+                use secrecy::SecretString;
+
+                let account_id = env::var("CLOUDFLARE_EMAIL_ACCOUNT_ID")
+                    .expect("MAIL_PROVIDER=cloudflare requires CLOUDFLARE_EMAIL_ACCOUNT_ID");
+                let api_token = SecretString::from(
+                    env::var("CLOUDFLARE_EMAIL_API_TOKEN")
+                        .expect("MAIL_PROVIDER=cloudflare requires CLOUDFLARE_EMAIL_API_TOKEN"),
+                );
+                let webhook_secret = SecretString::from(
+                    env::var("CLOUDFLARE_EMAIL_WEBHOOK_SECRET").unwrap_or_default(),
+                );
+                let base_url = env::var("CLOUDFLARE_EMAIL_API_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.cloudflare.com/client/v4".to_string());
+                let allowed = env::var("CLOUDFLARE_EMAIL_ALLOWED_ADDRESSES")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| {
+                        s.split(',')
+                            .map(|x| x.trim().to_string())
+                            .collect::<Vec<_>>()
+                    });
+                let cf = CloudflareMailProvider::new(
+                    account_id,
+                    api_token,
+                    webhook_secret,
+                    base_url,
+                    from_address,
+                    from_name,
+                    http_client,
+                    allowed,
+                )
+                .expect("failed to build Cloudflare mail provider");
+                providers.insert("cloudflare".to_string(), std::sync::Arc::new(cf));
+                "cloudflare"
+            }
+            #[cfg(not(feature = "mail-cloudflare"))]
+            {
+                let _ = http_client;
+                panic!(
+                    "MAIL_PROVIDER=cloudflare but the 'mail-cloudflare' feature is not enabled in this build"
+                );
+            }
+        }
+        // default (and explicit "smtp")
+        _ => {
+            let transport = ruxlog::services::mail::smtp::create_connection().await;
+            let smtp = SmtpMailProvider::new(transport, from_address, from_name);
+            providers.insert("smtp".to_string(), std::sync::Arc::new(smtp));
+            "smtp"
+        }
+    };
+
+    tracing::info!(provider = %default, rate_limit_enabled, "Mail router initialized");
+    std::sync::Arc::new(MailRouter::new(
+        providers,
+        default.to_string(),
+        redis_pool,
+        db,
+        limits,
+        rate_limit_enabled,
+    ))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
@@ -99,7 +204,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sea_db = db::sea_connect::get_sea_connection().await;
 
     let (redis_pool, redis_connection) = init_redis_store().await?;
-    let mailer = services::mail::smtp::create_connection().await;
 
     let bucket = env_with_fallback(&["S3_BUCKET", "AWS_S3_BUCKET"], None)
         .expect("S3_BUCKET or AWS_S3_BUCKET must be set");
@@ -185,6 +289,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cheaply (it is internally an `Arc`) into each provider and the Google
     // userinfo/JWKS fetch. See `state::build_http_client`.
     let http_client = ruxlog::state::build_http_client();
+
+    // Mail router (SMTP or Cloudflare, selected by MAIL_PROVIDER). Built after
+    // http_client since the Cloudflare provider reuses the shared client.
+    let mailer = build_mail_router(sea_db.clone(), redis_pool.clone(), http_client.clone()).await;
 
     #[cfg(feature = "billing")]
     let billing_router: std::sync::Arc<BillingRouter> = {
@@ -589,7 +697,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(feature = "scheduler")]
-    services::scheduler::start_scheduler(state.clone());
+    ruxlog::services::scheduler::start_scheduler(state.clone());
 
     tracing::info!("Redis successfully established.");
     let session_store = RedisStore::new(redis_pool);

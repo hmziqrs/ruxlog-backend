@@ -4,6 +4,7 @@ pub mod auth;
 pub mod mail;
 pub mod paywall;
 pub mod redis;
+pub mod webhook_util;
 
 // Feature-gated
 #[cfg(feature = "image-optimization")]

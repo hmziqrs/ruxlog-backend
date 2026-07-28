@@ -1,7 +1,14 @@
 use std::env;
 
-use lettre::{transport::smtp::authentication::Credentials, AsyncSmtpTransport, Tokio1Executor};
-use tracing::{info, instrument};
+use async_trait::async_trait;
+use lettre::message::header::ContentType;
+use lettre::{
+    transport::smtp::authentication::Credentials, AsyncSmtpTransport, AsyncTransport, Message,
+    Tokio1Executor,
+};
+use tracing::instrument;
+
+use super::provider::{MailError, MailProvider, OutboundEmail, SendReceipt};
 
 /// Default to STARTTLS (port 587) unless an implicit-TLS mode is requested.
 const TLS_MODE_IMPLICIT: &str = "tls";
@@ -27,6 +34,9 @@ fn use_implicit_tls() -> bool {
     matches!(env::var("SMTP_PORT").ok().as_deref(), Some("465"))
 }
 
+/// Build the shared SMTP transport from `SMTP_*` env vars. Panics (boot-fail)
+/// when `MAIL_PROVIDER=smtp` and any required var is missing — fail-loud is the
+/// current contract, preserved by the provider selector in `main.rs`.
 #[instrument(name = "smtp_connection_init")]
 pub async fn create_connection() -> AsyncSmtpTransport<Tokio1Executor> {
     let host = env::var("SMTP_HOST").expect("SMTP_HOST must be set");
@@ -34,11 +44,11 @@ pub async fn create_connection() -> AsyncSmtpTransport<Tokio1Executor> {
     let password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD must be set");
 
     let implicit_tls = use_implicit_tls();
-    info!(
+    tracing::info!(
         smtp_host = %host,
         smtp_user = %username,
         tls_mode = if implicit_tls { "implicit(tls/465)" } else { "starttls(587)" },
-        "Initializing SMTP connection"
+        "Initializing SMTP transport"
     );
 
     let creds = Credentials::new(username, password);
@@ -49,7 +59,7 @@ pub async fn create_connection() -> AsyncSmtpTransport<Tokio1Executor> {
     //     or SMTP_PORT=465.
     //   - otherwise: STARTTLS upgrade over a plain connection via
     //     `starttls_relay` (the original behaviour).
-    let mailer = if implicit_tls {
+    let transport = if implicit_tls {
         AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
             .expect("failed to build implicit-TLS SMTP transport")
     } else {
@@ -59,7 +69,86 @@ pub async fn create_connection() -> AsyncSmtpTransport<Tokio1Executor> {
     .credentials(creds)
     .build();
 
-    info!("SMTP connection established");
+    tracing::info!("SMTP transport built");
+    transport
+}
 
-    mailer
+/// SMTP [`MailProvider`]. Wraps a pre-built lettre transport and the verified
+/// sender address; the router records telemetry after delegation, so `send`
+/// does not touch `mail_metrics` itself.
+pub struct SmtpMailProvider {
+    transport: AsyncSmtpTransport<Tokio1Executor>,
+    from_address: String,
+    from_name: Option<String>,
+}
+
+impl SmtpMailProvider {
+    pub fn new(
+        transport: AsyncSmtpTransport<Tokio1Executor>,
+        from_address: String,
+        from_name: Option<String>,
+    ) -> Self {
+        Self {
+            transport,
+            from_address,
+            from_name,
+        }
+    }
+
+    /// Compose the RFC 5322 `From` header value for the configured sender.
+    fn sender_header(&self) -> String {
+        match &self.from_name {
+            Some(name) if !name.trim().is_empty() => {
+                format!("{name} <{}>", self.from_address)
+            }
+            _ => self.from_address.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl MailProvider for SmtpMailProvider {
+    fn provider_name(&self) -> &'static str {
+        "smtp"
+    }
+
+    async fn send(&self, msg: OutboundEmail) -> Result<SendReceipt, MailError> {
+        let from = self.sender_header().parse().map_err(|e| {
+            MailError::Config(format!(
+                "invalid sender address '{value}': {e}",
+                value = self.from_address
+            ))
+        })?;
+        let to = msg
+            .to
+            .parse()
+            .map_err(|_| MailError::InvalidRecipient("invalid recipient address".to_string()))?;
+
+        let (content_type, body) = match (&msg.html, &msg.text) {
+            (Some(html), _) => (ContentType::TEXT_HTML, html.clone()),
+            (None, Some(text)) => (ContentType::TEXT_PLAIN, text.clone()),
+            (None, None) => (ContentType::TEXT_PLAIN, String::new()),
+        };
+
+        let email = Message::builder()
+            .from(from)
+            .to(to)
+            .subject(msg.subject.as_str())
+            .header(content_type)
+            .body(body)
+            .map_err(|e| MailError::ProviderApi(format!("failed to build message: {e}")))?;
+
+        self.transport
+            .send(email)
+            .await
+            .map_err(|e| MailError::ProviderApi(e.to_string()))?;
+
+        // lettre confirms delivery synchronously: treat a successful send as
+        // delivered. SMTP has no notion of synchronous permanent bounces.
+        Ok(SendReceipt {
+            delivered: 1,
+            queued: 0,
+            permanent_bounces: Vec::new(),
+        })
+    }
 }

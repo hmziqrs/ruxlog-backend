@@ -9,7 +9,10 @@ use crate::{
     db::sea_models::{forgot_password, user},
     error::{ErrorCode, ErrorResponse},
     extractors::ValidatedJson,
-    services::{abuse_limiter, mail::send_forgot_password_email},
+    services::{
+        abuse_limiter,
+        mail::{mail_error_to_response, send_forgot_password_email},
+    },
     AppState,
 };
 
@@ -256,9 +259,7 @@ pub async fn generate(
     }
     if let Err(err) = send_forgot_password_email(&state.mailer, &payload.email, &code).await {
         error!(user_id, email = %payload.email, "Failed to send forgot password email: {}", err);
-        return Err(ErrorResponse::new(ErrorCode::ExternalServiceError)
-            .with_message("Failed to send verification code")
-            .with_details(err));
+        return Err(mail_error_to_response(&err));
     }
 
     info!(user_id, email = %payload.email, "Recovery email sent");

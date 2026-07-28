@@ -286,3 +286,17 @@ pub async fn dedup_nx(
         }
     }
 }
+
+/// Release a dedup claim early (best-effort `DEL`) so a gated operation that
+/// failed after claiming — e.g. a newsletter send that was rate-limited — can be
+/// retried within the window instead of being suppressed as a duplicate. The
+/// claim marks *completed* work; releasing it on failure keeps that invariant.
+/// Fail-open/silent on a Redis error (the key simply TTLs out).
+pub async fn release_dedup(redis_pool: &RedisPool, key: &str) {
+    const DEL: &str = "return redis.call('DEL', KEYS[1])";
+    let keys = vec![key.to_string()];
+    let res: Result<Vec<Value>, _> = redis_pool.eval(DEL, keys, Vec::<Value>::new()).await;
+    if let Err(err) = res {
+        warn!(error = %err, %key, "dedup release failed (fail-open)");
+    }
+}

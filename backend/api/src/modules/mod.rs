@@ -3,6 +3,7 @@ pub mod auth_v1;
 pub mod category_v1;
 pub mod csrf_v1;
 pub mod feed_v1;
+pub mod mail_v1;
 pub mod media_v1;
 pub mod post_v1;
 pub mod tag_v1;

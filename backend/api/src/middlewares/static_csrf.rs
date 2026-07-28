@@ -104,8 +104,9 @@ fn is_csrf_exempt(path: &str) -> bool {
     ) {
         return true;
     }
-    // Webhook receivers: exactly /billing/v1/webhook/{provider} (5 segments
-    // when split on '/': ["", "billing", "v1", "webhook", "<provider>"]).
+    // Webhook receivers: exactly /billing/v1/webhook/{provider} or
+    // /mail/v1/webhook/{provider} (5 segments when split on '/':
+    // ["", "<billing|mail>", "v1", "webhook", "<provider>"]).
     let mut segs = path.split('/');
     let _leading = segs.next();
     matches!(
@@ -117,6 +118,7 @@ fn is_csrf_exempt(path: &str) -> bool {
             segs.next(),
         ),
         (Some("billing"), Some("v1"), Some("webhook"), Some(_), None)
+            | (Some("mail"), Some("v1"), Some("webhook"), Some(_), None)
     )
 }
 
@@ -226,6 +228,12 @@ mod tests {
         assert!(!is_csrf_exempt("/billing/v1/webhook-evil/x"));
         assert!(!is_csrf_exempt("/billing/v1/webhook")); // no provider segment
         assert!(!is_csrf_exempt("/billing/v1/webhook/a/b")); // too many segments
+
+        // Mail bounce/complaint webhook receiver — same exact-match contract.
+        assert!(is_csrf_exempt("/mail/v1/webhook/cloudflare"));
+        assert!(!is_csrf_exempt("/mail/v1/webhook-evil/x"));
+        assert!(!is_csrf_exempt("/mail/v1/webhook")); // no provider segment
+        assert!(!is_csrf_exempt("/mail/v1/webhook/a/b")); // too many segments
 
         // OAuth + generate bootstrap are exempt (exact).
         assert!(is_csrf_exempt("/auth/google/v1/callback"));

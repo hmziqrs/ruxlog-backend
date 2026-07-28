@@ -99,6 +99,8 @@ pub enum ErrorCode {
     InvalidEmailFormat,
     #[serde(rename = "EML_003")]
     EmailDeliveryError,
+    #[serde(rename = "EML_004")]
+    EmailSuppressed,
 
     #[serde(rename = "PST_001")]
     PostNotFound,
@@ -179,6 +181,7 @@ impl ErrorCode {
             Self::EmailSendingError => "Failed to send email",
             Self::InvalidEmailFormat => "Invalid email format",
             Self::EmailDeliveryError => "Email delivery failed",
+            Self::EmailSuppressed => "Email delivery suppressed",
 
             Self::PostNotFound => "Post not found",
             Self::InvalidPostStatus => "Invalid post status",
@@ -249,6 +252,7 @@ impl ErrorCode {
             Self::EmailSendingError => 500,
             Self::InvalidEmailFormat => 400,
             Self::EmailDeliveryError => 500,
+            Self::EmailSuppressed => 422,
 
             Self::PostNotFound => 404,
             Self::InvalidPostStatus => 400,

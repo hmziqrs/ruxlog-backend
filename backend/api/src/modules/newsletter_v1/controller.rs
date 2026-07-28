@@ -1,7 +1,6 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use axum_client_ip::ClientIp;
 use axum_macros::debug_handler;
-use lettre::{message::header::ContentType, AsyncTransport, Message};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::json;
 use tracing::{error, info, instrument, warn};
@@ -24,46 +23,31 @@ use super::validator::{
     V1ListSubscribersQuery, V1SendNewsletterPayload, V1SubscribePayload, V1UnsubscribePayload,
 };
 
-fn generic_internal_error() -> ErrorResponse {
-    ErrorResponse::new(ErrorCode::InternalServerError).with_message("Internal server error")
-}
+/// Pace between newsletter sends to stay under the provider per-minute quota
+/// (MAIL_PROVIDER_CFG defaults to 50/min → ~1.3s keeps us under it without a
+/// burst that trips the temp block).
+const NEWSLETTER_PACE: std::time::Duration = std::time::Duration::from_millis(1300);
+/// How many times to back off + retry a single recipient when the provider
+/// quota bucket throttles it before counting the send as failed.
+const NEWSLETTER_MAX_THROTTLE_RETRIES: u8 = 2;
 
 async fn send_mail(
-    mailer: &lettre::AsyncSmtpTransport<lettre::Tokio1Executor>,
+    mailer: &crate::services::mail::MailRouter,
     to_email: &str,
     subject: &str,
     html: Option<&str>,
     text: Option<&str>,
-) -> Result<(), ErrorResponse> {
-    let from_addr = "No reply <no-reply@domain.tld>"
-        .parse()
-        .map_err(|_| generic_internal_error())?;
-    let to_addr = to_email.parse().map_err(|_| generic_internal_error())?;
+) -> Result<(), crate::services::mail::MailError> {
+    use crate::services::mail::{provider::TEMPLATE_NEWSLETTER, MailProvider, OutboundEmail};
 
-    let body_html = html.map(|s| s.to_string());
-    let body_text = text.map(|s| s.to_string()).or_else(|| body_html.clone());
-
-    let (content_type, body) = if let Some(h) = body_html {
-        (ContentType::TEXT_HTML, h)
-    } else if let Some(t) = body_text {
-        (ContentType::TEXT_PLAIN, t)
-    } else {
-        (ContentType::TEXT_PLAIN, "".to_string())
+    let msg = OutboundEmail {
+        to: to_email.to_string(),
+        subject: subject.to_string(),
+        html: html.map(|s| s.to_string()),
+        text: text.map(|s| s.to_string()),
+        template: Some(TEMPLATE_NEWSLETTER),
     };
-
-    let email = Message::builder()
-        .from(from_addr)
-        .to(to_addr)
-        .subject(subject)
-        .header(content_type)
-        .body(body)
-        .map_err(|_| generic_internal_error())?;
-
-    mailer
-        .send(email)
-        .await
-        .map_err(|_| generic_internal_error())?;
-    Ok(())
+    mailer.send(msg).await.map(|_| ())
 }
 
 #[debug_handler]
@@ -210,23 +194,55 @@ pub async fn send(
 
                 let mut sent = 0u64;
                 let mut failed = 0u64;
+                let mut throttled = 0u64;
 
                 for sub in subscribers {
-                    match send_mail(
-                        &state_cloned.mailer,
-                        &sub.email,
-                        &subject,
-                        html.as_deref(),
-                        Some(&text),
-                    )
-                    .await
-                    {
-                        Ok(_) => sent += 1,
-                        Err(_) => failed += 1,
+                    let mut attempts = 0u8;
+                    loop {
+                        match send_mail(
+                            &state_cloned.mailer,
+                            &sub.email,
+                            &subject,
+                            html.as_deref(),
+                            Some(&text),
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                sent += 1;
+                                break;
+                            }
+                            Err(crate::services::mail::MailError::Throttled {
+                                retry_after_secs,
+                            }) => {
+                                // The shared provider-quota bucket throttled us.
+                                // Back off by the limiter's retry window, then
+                                // retry this recipient (bounded) rather than
+                                // silently dropping it as a generic failure.
+                                attempts += 1;
+                                if attempts > NEWSLETTER_MAX_THROTTLE_RETRIES {
+                                    throttled += 1;
+                                    failed += 1;
+                                    break;
+                                }
+                                let wait = retry_after_secs.max(1);
+                                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                            }
+                            Err(_) => {
+                                failed += 1;
+                                break;
+                            }
+                        }
                     }
+                    // Pace to stay under the provider per-minute quota so the
+                    // next send does not trip the temp block.
+                    tokio::time::sleep(NEWSLETTER_PACE).await;
                 }
 
-                info!(sent, failed, total, "Newsletter send task completed");
+                info!(
+                    sent,
+                    failed, throttled, total, "Newsletter send task completed"
+                );
                 tracing::Span::current().record("sent", sent);
                 tracing::Span::current().record("failed", failed);
                 tracing::Span::current().record("result", "completed");

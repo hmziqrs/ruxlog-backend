@@ -10,7 +10,7 @@ edition = "2021"
 publish = false
 
 [features]
-default = ["basic"]
+default = ["basic", "mail-cloudflare"]
 
 # Basic blog (minimal) - DEFAULT for open source release.
 # Includes the #14 action toggles so a default build keeps ALL current behavior;
@@ -34,6 +34,7 @@ full = [
     "auth-passkey",
     "image-moderation",
     "cache",
+    "mail-cloudflare",
     "post-management",
     "auth-login",
     "auth-signup",
@@ -62,6 +63,11 @@ openapi = ["utoipa", "utoipa-swagger-ui"]
 
 # Billing / monetization — all providers always compiled when billing is on
 billing = []
+
+# Cloudflare Email Sending provider + inbound bounce/complaint webhook. The
+# MailProvider trait, MailRouter, SMTP provider, and email_suppression table are
+# always-on; this gates only the Cloudflare provider + webhook receiver.
+mail-cloudflare = []
 
 # --- Features added for the issues batch (2026-07-27) ---
 # #29 in-app/push notifications (FCM v1 over reqwest+jsonwebtoken via internal rux-fcm crate)

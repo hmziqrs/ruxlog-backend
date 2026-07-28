@@ -12,7 +12,11 @@ use crate::{
     db::sea_models::{email_verification, user},
     error::{ErrorCode, ErrorResponse},
     extractors::ValidatedJson,
-    services::{abuse_limiter, auth::AuthSession, mail::send_email_verification_code},
+    services::{
+        abuse_limiter,
+        auth::AuthSession,
+        mail::{mail_error_to_response, send_email_verification_code},
+    },
     AppState,
 };
 
@@ -147,9 +151,7 @@ pub async fn resend(
     email_verification::Entity::regenerate(pool, user_id, code_hash).await?;
     if let Err(err) = send_email_verification_code(&state.mailer, &user.email, &code).await {
         error!(user_id, "Failed to send verification email: {}", err);
-        return Err(ErrorResponse::new(ErrorCode::ExternalServiceError)
-            .with_message("Failed to send verification email")
-            .with_details(err));
+        return Err(mail_error_to_response(&err));
     }
 
     info!(user_id, "Verification email sent");
@@ -311,9 +313,7 @@ pub async fn admin_issue_code(
 
     if let Err(err) = send_email_verification_code(&state.mailer, &target.email, &code).await {
         error!(user_id, "Failed to send verification email: {}", err);
-        return Err(ErrorResponse::new(ErrorCode::ExternalServiceError)
-            .with_message("Failed to send verification email")
-            .with_details(err));
+        return Err(mail_error_to_response(&err));
     }
 
     info!(user_id, "Admin issued a new email-verification code");

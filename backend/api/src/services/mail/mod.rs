@@ -1,103 +1,60 @@
-use lettre::{AsyncSmtpTransport, AsyncTransport};
-use std::time::Instant;
-use tracing::{error, info, instrument};
+//! Mail service: provider trait + router + providers.
+//!
+//! `MailRouter` (always-on) runs the cross-cutting send-time guards and holds
+//! the active provider(s). The public transactional helpers below build an
+//! [`OutboundEmail`] and hand it to the router, returning [`MailError`]; callers
+//! map that via [`mail_error_to_response`]. SMTP is always available; the
+//! Cloudflare provider compiles under the `mail-cloudflare` feature.
 
-use crate::utils::telemetry;
-
+#[cfg(feature = "mail-cloudflare")]
+pub mod cloudflare;
+pub mod error_map;
 mod html_templates;
+pub mod provider;
+pub mod router;
 pub mod smtp;
 pub mod templates;
 
-const DOMAIN: &str = "domain.tld";
+pub use error_map::mail_error_to_response;
+pub use provider::{MailError, MailProvider, OutboundEmail, SendReceipt};
+pub use router::MailRouter;
 
-#[instrument(skip(mailer, body), fields(recipient_domain, result))]
-async fn send_email(
-    mailer: &AsyncSmtpTransport<lettre::Tokio1Executor>,
-    email_to: &str,
-    email_from: &str,
-    subject: &str,
-    body: String,
-) -> Result<(), String> {
-    let metrics = telemetry::mail_metrics();
-    let start = Instant::now();
+use provider::{TEMPLATE_PASSWORD_RESET, TEMPLATE_VERIFICATION};
 
-    let recipient_domain = email_to.split('@').nth(1).unwrap_or("unknown");
-    tracing::Span::current().record("recipient_domain", recipient_domain);
-
-    info!(
-        to = %email_to,
-        from = %email_from,
-        subject = %subject,
-        "Sending email"
-    );
-
-    let email_to_parsed = email_to.parse().map_err(|e| {
-        error!(error = %e, to = %email_to, "Failed to parse recipient email");
-        "Invalid recipient email address"
-    })?;
-
-    let email_from_parsed = email_from.parse().map_err(|e| {
-        error!(error = %e, from = %email_from, "Failed to parse sender email");
-        "Invalid sender email address"
-    })?;
-
-    let email = lettre::Message::builder()
-        .from(email_from_parsed)
-        .to(email_to_parsed)
-        .subject(subject)
-        .header(lettre::message::header::ContentType::TEXT_HTML)
-        .body(body)
-        .map_err(|e| {
-            error!(error = %e, "Failed to build email message");
-            e.to_string()
-        })?;
-
-    match mailer.send(email).await {
-        Ok(_) => {
-            let duration = start.elapsed().as_millis() as f64;
-            metrics.send_duration.record(duration, &[]);
-            metrics.emails_sent.add(1, &[]);
-
-            info!(to = %email_to, "Email sent successfully");
-            tracing::Span::current().record("result", "success");
-
-            Ok(())
-        }
-        Err(e) => {
-            metrics.emails_failed.add(1, &[]);
-            error!(error = %e, to = %email_to, "Failed to send email");
-            tracing::Span::current().record("result", "failure");
-            Err(e.to_string())
-        }
-    }
-}
-
-#[instrument(skip(mailer, code), fields(email_type = "verification"))]
+/// Send a one-time email verification code through the mail router.
 pub async fn send_email_verification_code(
-    mailer: &AsyncSmtpTransport<lettre::Tokio1Executor>,
+    mailer: &MailRouter,
     email: &str,
     code: &str,
-) -> Result<(), String> {
-    info!(to = %email, "Sending email verification code");
-
-    let no_reply = format!("No reply <no-reply@{}>", DOMAIN);
-    let subject = "Email verification code";
+) -> Result<(), MailError> {
     let body = html_templates::email_otp_html(code);
-
-    send_email(mailer, email, &no_reply, subject, body).await
+    mailer
+        .send(OutboundEmail {
+            to: email.to_string(),
+            subject: "Email verification code".to_string(),
+            html: Some(body),
+            text: None,
+            template: Some(TEMPLATE_VERIFICATION),
+        })
+        .await?;
+    Ok(())
 }
 
-#[instrument(skip(mailer, code), fields(email_type = "password_reset"))]
+/// Send a password-reset code through the mail router.
 pub async fn send_forgot_password_email(
-    mailer: &AsyncSmtpTransport<lettre::Tokio1Executor>,
+    mailer: &MailRouter,
     email: &str,
     code: &str,
-) -> Result<(), String> {
-    info!(to = %email, "Sending password reset email");
-
-    let no_reply = format!("No reply <no-reply@{}>", DOMAIN);
-    let subject = "Password Reset Verification Code";
+) -> Result<(), MailError> {
     let body = html_templates::email_otp_html(code);
-
-    send_email(mailer, email, &no_reply, subject, body).await
+    mailer
+        .send(OutboundEmail {
+            to: email.to_string(),
+            subject: "Password reset verification code".to_string(),
+            html: Some(body),
+            text: None,
+            template: Some(TEMPLATE_PASSWORD_RESET),
+        })
+        .await?;
+    Ok(())
 }

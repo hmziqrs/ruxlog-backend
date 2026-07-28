@@ -59,6 +59,7 @@ mod m20260727_000053_create_devices_table;
 mod m20260727_000054_create_notifications_table;
 mod m20260727_000055_create_passkey_credentials_table;
 mod m20260727_000056_create_user_oauth_identities_table;
+mod m20260727_000057_create_email_suppression_table;
 
 pub struct Migrator;
 
@@ -127,6 +128,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260727_000054_create_notifications_table::Migration),
             Box::new(m20260727_000055_create_passkey_credentials_table::Migration),
             Box::new(m20260727_000056_create_user_oauth_identities_table::Migration),
+            Box::new(m20260727_000057_create_email_suppression_table::Migration),
         ]
     }
 }

@@ -1,5 +1,4 @@
 use axum::extract::FromRef;
-use lettre;
 use opentelemetry::metrics::Meter;
 use sea_orm::DatabaseConnection;
 use tower_sessions_redis_store::fred::prelude::Pool as RedisPool;
@@ -83,7 +82,7 @@ pub struct OptimizerConfig {
 pub struct AppState {
     pub sea_db: DatabaseConnection,
     pub redis_pool: RedisPool,
-    pub mailer: lettre::AsyncSmtpTransport<lettre::Tokio1Executor>,
+    pub mailer: std::sync::Arc<crate::services::mail::MailRouter>,
     pub object_storage: ObjectStorageConfig,
     pub s3_client: aws_sdk_s3::Client,
     /// Server secret (the `COOKIE_KEY` bytes) used to derive keyed hashes for

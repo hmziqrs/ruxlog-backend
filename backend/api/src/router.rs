@@ -13,7 +13,7 @@ use tracing::Level;
 
 use crate::middlewares::{http_metrics, rate_limit, request_id_middleware, security_headers};
 use crate::modules::{
-    auth_v1, category_v1, csrf_v1, feed_v1, media_v1, post_v1, search_v1, tag_v1, user_v1,
+    auth_v1, category_v1, csrf_v1, feed_v1, mail_v1, media_v1, post_v1, search_v1, tag_v1, user_v1,
 };
 use fred::interfaces::ClientLike;
 
@@ -113,6 +113,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     router = router
         .nest("/category/v1", category_v1::routes())
         .nest("/tag/v1", tag_v1::routes())
+        .nest("/mail/v1", mail_v1::routes())
         // DOS-MEDIA-OPTIMIZER: the upload path runs the CPU-heavy image
         // optimizer; give /media/v1 its own tight per-IP cap (it is also
         // author-gated) so a burst of uploads cannot monopolize workers.

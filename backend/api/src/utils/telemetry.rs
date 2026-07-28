@@ -499,6 +499,46 @@ impl MailMetrics {
     }
 }
 
+/// Mail-router-layer metrics: counts for the cross-cutting send-time guards so
+/// operators can observe how many sends each guard drops. The provider's own
+/// `mail.sent`/`mail.failed` only fire when a send actually reaches the
+/// provider, so without these the suppressed/throttled/deduped short-circuits
+/// are invisible.
+pub struct MailRouterMetrics {
+    pub suppressed: Counter<u64>,
+    pub throttled: Counter<u64>,
+    pub deduped: Counter<u64>,
+    pub bounced_sync: Counter<u64>,
+    pub suppression_check_failed: Counter<u64>,
+}
+
+impl MailRouterMetrics {
+    pub fn new(meter: &Meter) -> Self {
+        Self {
+            suppressed: meter
+                .u64_counter("mail.suppressed")
+                .with_description("Sends short-circuited by the suppression list")
+                .build(),
+            throttled: meter
+                .u64_counter("mail.throttled")
+                .with_description("Sends rejected by the mail rate limiter")
+                .build(),
+            deduped: meter
+                .u64_counter("mail.deduped")
+                .with_description("Duplicate sends suppressed by the dedup window")
+                .build(),
+            bounced_sync: meter
+                .u64_counter("mail.bounced.sync")
+                .with_description("Recipients auto-suppressed from synchronous permanent bounces")
+                .build(),
+            suppression_check_failed: meter
+                .u64_counter("mail.suppression.check.failed")
+                .with_description("Suppression pre-check DB errors (fail-open degradation)")
+                .build(),
+        }
+    }
+}
+
 impl HttpMetrics {
     pub fn new(meter: &Meter) -> Self {
         let request_duration = meter
@@ -531,6 +571,7 @@ static AUTH_METRICS: OnceLock<AuthMetrics> = OnceLock::new();
 static IMAGE_METRICS: OnceLock<ImageMetrics> = OnceLock::new();
 static LIMITER_METRICS: OnceLock<LimiterMetrics> = OnceLock::new();
 static MAIL_METRICS: OnceLock<MailMetrics> = OnceLock::new();
+static MAIL_ROUTER_METRICS: OnceLock<MailRouterMetrics> = OnceLock::new();
 
 pub fn http_metrics() -> &'static HttpMetrics {
     HTTP_METRICS.get_or_init(|| HttpMetrics::new(&global_meter()))
@@ -550,6 +591,10 @@ pub fn limiter_metrics() -> &'static LimiterMetrics {
 
 pub fn mail_metrics() -> &'static MailMetrics {
     MAIL_METRICS.get_or_init(|| MailMetrics::new(&global_meter()))
+}
+
+pub fn mail_router_metrics() -> &'static MailRouterMetrics {
+    MAIL_ROUTER_METRICS.get_or_init(|| MailRouterMetrics::new(&global_meter()))
 }
 
 pub fn init_pool_metrics() {

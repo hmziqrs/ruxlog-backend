@@ -39,6 +39,11 @@ urlencoding = "2.1"
 
 # Server-only dependencies
 tokio = { version = "1", features = ["full"], optional = true }
+# axum is required only by the SSR launch path (csp_nonce middleware wraps the
+# dioxus server router). Pinned to 0.8 so it unifies with the axum 0.8.9 that
+# dioxus-server 0.8.0-alpha.0 already pulls in (two axum major versions would
+# make the Router types fail to unify).
+axum = { version = "0.8", optional = true }
 
 # WASM-only dependencies (feature-gated)
 gloo-timers = { version = "0.3.0", features = ["futures"], optional = true }
@@ -107,7 +112,7 @@ web = [
 ]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
-server = ["dioxus/server", "dioxus-ssr", "tokio"]
+server = ["dioxus/server", "dioxus-ssr", "tokio", "axum", "getrandom"]
 
 # Blog feature flags
 basic = []

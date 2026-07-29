@@ -32,14 +32,19 @@ const DEFAULT_HSTS: &str = "max-age=31536000; includeSubDomains";
 
 // Restrictive default CSP for THIS API's responses. Caveat: the middleware
 // only sets headers on the JSON API origin; the Dioxus WASM frontends are
-// served from separate origins and must carry their own CSP — so `script-src
-// 'self'` here is NOT the primary stored-XSS control. The primary control is
-// the server-side ammonia sanitizer (utils/sanitize.rs, plan Phase 6e) that
-// strips `<script>`/event-handler attributes/`javascript:` from post content
-// on read. These headers remain defence-in-depth for any HTML the API emits.
+// served from separate origins and must carry their own CSP — so this CSP is
+// NOT the primary stored-XSS control. The primary control is the server-side
+// ammonia sanitizer (utils/sanitize.rs, plan Phase 6e) that strips
+// `<script>`/event-handler attributes/`javascript:` from post content on
+// read. These headers remain defence-in-depth for any HTML the API emits.
+// `script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'`: the wasm/eval keywords
+// are required by the WASM runtime (WebAssembly compilation + dioxus-web's
+// document::eval via `new Function`) and are harmless on JSON; crucially,
+// 'unsafe-inline' is still withheld so an injected inline script / event
+// handler / javascript: URI cannot execute (stored-XSS invariant).
 // Inline styles + Google Fonts are permitted (the apps inject styles / font).
 const DEFAULT_CSP: &str = "default-src 'self'; \
-    script-src 'self'; \
+    script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; \
     style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
     font-src 'self' https://fonts.gstatic.com; \
     img-src 'self' data: https:; \
@@ -140,11 +145,24 @@ mod tests {
             .expect("CSP header present")
             .to_str()
             .unwrap();
-        // script-src restricted to 'self' only (blocks inline <script> from
-        // stored XSS via dangerous_inner_html) and object-src disabled.
+        // script-src must stay strict: 'self' plus ONLY the wasm/eval keywords
+        // the WASM runtime needs. 'unsafe-inline' must NEVER appear — it would
+        // re-enable stored-XSS via dangerous_inner_html (documented invariant).
         assert!(
-            csp.contains("script-src 'self';"),
-            "script-src must be 'self' only, got: {csp}"
+            csp.contains("script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'"),
+            "script-src must be 'self' + wasm/eval keywords, got: {csp}"
+        );
+        // Check ONLY the script-src directive for 'unsafe-inline': style-src
+        // legitimately uses 'unsafe-inline' for injected styles, so a whole-
+        // header check would false-positive. script-src must never grant it.
+        let script_src = csp
+            .split("script-src ")
+            .nth(1)
+            .and_then(|s| s.split(';').next())
+            .unwrap_or("");
+        assert!(
+            !script_src.contains("'unsafe-inline'"),
+            "script-src must NEVER grant 'unsafe-inline' (stored-XSS invariant): {csp}"
         );
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));

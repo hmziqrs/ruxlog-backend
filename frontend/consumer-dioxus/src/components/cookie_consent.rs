@@ -7,15 +7,18 @@ pub fn CookieConsent() -> Element {
     let mut visible = use_signal(|| {
         #[cfg(target_arch = "wasm32")]
         {
-            let stored = js_sys::Reflect::get(
-                &web_sys::window().unwrap().local_storage().unwrap().unwrap(),
-                &wasm_bindgen::JsValue::from_str("cookie_consent"),
-            )
-            .ok();
-            match stored {
-                Some(val) => !js_sys::Boolean::from(val).value_of(),
-                None => true,
-            }
+            // Show the banner until the user has explicitly accepted
+            // (localStorage "cookie_consent" == "true"). An absent key (first
+            // visit), "false", or unavailable storage all default to showing it.
+            // NOTE: use getItem (None when absent), not Reflect::get — the latter
+            // returns `undefined` for missing keys, and coercing that through
+            // js_sys::Boolean::from(..).value_of() throws (valueOf on undefined).
+            let consented = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+                .and_then(|s| s.get_item("cookie_consent").ok().flatten())
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            !consented
         }
         #[cfg(not(target_arch = "wasm32"))]
         {

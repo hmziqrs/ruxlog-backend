@@ -13,6 +13,8 @@ pub mod screens;
 pub mod seo;
 #[cfg(feature = "server")]
 pub mod server;
+#[cfg(feature = "server")]
+mod csp_nonce;
 pub mod server_fns;
 pub mod utils;
 
@@ -42,11 +44,18 @@ fn configure_http_client() {
 fn main() {
     configure_http_client();
 
-    dioxus::LaunchBuilder::new()
-        .with_cfg(server_only! {
-            dioxus::server::ServeConfig::default()
-        })
-        .launch(App);
+    // Build the Dioxus fullstack router ourselves so we can wrap it in the CSP
+    // nonce layer (`csp_nonce`). Dioxus 0.8 fullstack SSR injects a dynamic
+    // per-render hydration `<script>` into the document that a static CSP
+    // cannot authorize: it is un-hashable, and granting 'unsafe-inline' would
+    // re-enable stored-XSS via `dangerous_inner_html`. The nonce layer stamps
+    // ONLY the Dioxus hydration scripts with a per-request nonce and serves
+    // `script-src 'self' 'nonce-<v>' 'wasm-unsafe-eval' 'unsafe-eval'`. See
+    // `csp_nonce.rs` for the rationale and the safety-critical invariant.
+    dioxus::server::serve(|| async {
+        Ok(dioxus::server::router(App)
+            .layer(axum::middleware::from_fn(csp_nonce::csp_nonce_middleware)))
+    });
 }
 
 #[cfg(all(

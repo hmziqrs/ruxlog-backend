@@ -73,20 +73,31 @@ http:
         stsPreload: true
         forceSTSHeader: true
 
-    # M-8: strict CSP for the WASM SPA origins. WASM ships as a same-origin
-    # module so script-src 'self' is safe (no inline, no eval). The policy is
-    # deliberately complete (no env interpolation — Traefik dynamic YAML does
-    # not expand shell vars). If the SPA fetches media from an object-storage
-    # bucket on a separate origin, ADD that origin to img-src / connect-src
-    # here. The same policy is also enforced via a <meta http-equiv> tag in
-    # each SPA index.html so it applies even before a router references this
-    # middleware.
+    # M-8: strict CSP for the STATIC WASM origins (the admin SPA, and the JSON
+    # API). script-src is 'self' plus 'wasm-unsafe-eval' (WebAssembly
+    # compilation) and 'unsafe-eval' (dioxus-web's document::eval via
+    # `new Function`); 'unsafe-inline' is intentionally withheld so injected
+    # inline scripts / event handlers / javascript: URIs cannot execute
+    # (stored-XSS defence-in-depth for dangerous_inner_html post content). The
+    # policy is deliberately complete (no env interpolation — Traefik dynamic
+    # YAML does not expand shell vars). If the SPA fetches media from an
+    # object-storage bucket on a separate origin, ADD that origin to img-src /
+    # connect-src here.
     #
-    # Reference from the SPA router labels, e.g.:
-    #   traefik.http.routers.<spa>.middlewares=spa-csp-headers@file,secure-transport-headers@file
+    # IMPORTANT — consumer SSR origin: the consumer app runs Dioxus FULLSTACK
+    # SSR, which injects a dynamic per-render hydration <script> that a static
+    # CSP cannot authorize. The consumer SSR container therefore emits its OWN
+    # per-request nonce CSP header (consumer-dioxus/src/csp_nonce.rs). Do NOT
+    # attach spa-csp-headers to the consumer SSR route: the browser intersects
+    # multiple Content-Security-Policy headers, and this static no-nonce policy
+    # would block the nonce'd hydration scripts. Attach spa-csp-headers only to
+    # STATIC origins (admin, and the JSON API).
+    #
+    # Reference from a static-origin router, e.g.:
+    #   traefik.http.routers.<admin>.middlewares=spa-csp-headers@file,secure-transport-headers@file
     spa-csp-headers:
       headers:
-        contentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        contentSecurityPolicy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 
   # V-MED-9 (edge attachment): the middlewares above were DEFINED here but
   # never referenced, so Traefik never applied them (Traefik does not auto-apply
@@ -124,10 +135,13 @@ http:
     # depending on each app/SPA container repeating the middleware labels.
     #
     # The CSP middleware is harmless on JSON API responses (browsers don't
-    # execute JSON) and load-bearing on the WASM SPA responses, so attaching it
-    # here is correct for both. If you later split API and SPA onto separate
-    # hosts/containers, give each its own Host(`...`) rule and the SAME
-    # middlewares list — do NOT drop spa-csp-headers from the SPA router.
+    # execute JSON) and correct for the client-only admin SPA. If you later
+    # split origins onto separate hosts/containers, give each its own
+    # Host(`...`) rule. KEEP spa-csp-headers on the API and admin (static)
+    # routers, but DROP it from the consumer SSR router: that container emits
+    # its own per-request nonce CSP header (consumer-dioxus/src/csp_nonce.rs),
+    # and a second static CSP header here would intersect and block the
+    # nonce'd hydration scripts. Keep secure-transport-headers (HSTS) on all.
     api-spa-secure:
       rule: "PathPrefix(`/`)"
       entrypoints:

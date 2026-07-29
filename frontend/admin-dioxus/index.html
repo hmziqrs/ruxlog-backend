@@ -6,20 +6,26 @@
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta charset="UTF-8" />
         <!--
-            M-8: Content-Security-Policy. This admin WASM SPA renders
-            server-supplied post HTML via dangerous_inner_html (client-side
-            ammonia sanitizes it — see src/screens/posts/view/components), so
-            script-src 'self' blocks any injected <script>/event-handler from
-            executing even if sanitization is bypassed. No inline script is
-            needed (the runtime is a same-origin WASM module); style-src allows
-            the inline styles + Google Fonts the app injects. The same policy
-            is mirrored as a Traefik `headers` middleware (spa-csp-headers@file)
-            for centralized prod enforcement; this <meta> is the enforced
-            fallback for any serving path that does not route through it.
+            M-8: Content-Security-Policy. This admin app is a client-only WASM
+            SPA (no SSR), so it injects NO dynamic inline scripts and needs no
+            nonce layer — this static <meta> is the authoritative policy. It
+            renders server-supplied post HTML via dangerous_inner_html
+            (client-side ammonia sanitizes it — see
+            src/screens/posts/view/components), so script-src must NOT grant
+            'unsafe-inline' (that would re-enable injected scripts / event
+            handlers / javascript: URIs and defeat the stored-XSS defence).
+            'wasm-unsafe-eval' authorizes WebAssembly compilation and
+            'unsafe-eval' authorizes dioxus-web's document::eval (used for the
+            theme toggle); neither weakens the stored-XSS control because they
+            only gate eval/WASM from an already-running JS context, which
+            'self' withholds from injected HTML. style-src allows the inline
+            styles + Google Fonts the app injects. The Traefik spa-csp-headers
+            middleware mirrors this header in prod; this meta is the fallback
+            for any serving path that does not route through it.
         -->
         <meta
             http-equiv="Content-Security-Policy"
-            content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+            content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
         />
     </head>
     <body class="antialiased min-h-full flex flex-col">

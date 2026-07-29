@@ -2301,6 +2301,7 @@ version = "0.1.0"
 dependencies = [
  "ammonia",
  "android-activity",
+ "axum",
  "base64 0.22.1",
  "bevy_pkv",
  "blitz-shell",

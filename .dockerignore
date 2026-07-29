@@ -1,0 +1,52 @@
+# Build context is the repo root (see docker-compose.yml `api.build.context`).
+# The api image only needs `backend/` + `crates/ruxlog-types`; exclude everything
+# else so the context sent to the daemon stays small. Mirrors backend/.dockerignore.
+.git
+**/.git
+.gitignore
+.vscode
+.DS_Store
+**/.DS_Store
+
+# Build artifacts (never bake into the image)
+target
+**/target
+node_modules
+**/node_modules
+dist
+**/dist
+
+# Logs
+*.log
+**/*.log
+
+# Top-level dirs the api image does not need
+frontend
+.playwright-mcp
+screenshots
+e2e
+docs
+.github
+.claude
+.cargo
+scripts
+
+# Backend subtrees not needed for the api compile (init-scripts are volume-mounted)
+backend/yaak
+backend/backup
+backend/traefik
+backend/tests
+
+# Docs / metadata
+*.md
+LICENSE
+
+# Env files are runtime config delivered via compose `env_file`, not baked in
+*.env
+.env*
+!**/*.env.example
+
+# Orchestration not needed inside the image
+docker-compose*.yml
+Justfile
+deny.toml

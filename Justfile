@@ -300,4 +300,3 @@ e2e env='dev':
     bash tests/comment_moderation_v1_smoke.sh
     bash tests/auth_v1_smoke.sh
     echo "===== e2e PASSED ====="
-

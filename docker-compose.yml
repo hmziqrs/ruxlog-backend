@@ -11,9 +11,11 @@ services:
   api:
     <<: *service-defaults
     profiles: ["full"]
+    # Context is the repo root so the build can reach the shared
+    # crates/ruxlog-types path-dependency (../../crates/ruxlog-types from api/).
     build:
-      context: ./backend
-      dockerfile: docker/Dockerfile.api
+      context: .
+      dockerfile: backend/docker/Dockerfile.api
     depends_on:
       postgres:
         condition: service_healthy

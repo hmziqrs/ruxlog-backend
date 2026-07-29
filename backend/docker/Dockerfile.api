@@ -1,26 +1,25 @@
-FROM rust:1.91.1-slim-trixie AS base
+# Pinned to the same stable toolchain that owns backend/api/Cargo.lock (matches
+# CI's dtolnay/rust-toolchain@stable). An older cargo (e.g. 1.91) resolves a
+# different graph than the committed lock and rejects it under --locked. Bump
+# this when the lock is regenerated under a newer stable.
+FROM rust:1.96.0-slim-trixie AS base
 WORKDIR /workspace
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev libpq-dev build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-FROM base AS deps
-COPY api/Cargo.toml api/Cargo.toml
-COPY api/Cargo.lock api/Cargo.lock
-COPY api/crates/rux-auth/Cargo.toml api/crates/rux-auth/Cargo.toml
-COPY api/migration/Cargo.toml api/migration/Cargo.toml
-COPY api/migration/Cargo.lock api/migration/Cargo.lock
-# Create dummy source files to satisfy cargo fetch with workspace members
-RUN mkdir -p api/src api/crates/rux-auth/src api/migration/src \
-    && echo "fn main() {}" > api/src/main.rs \
-    && echo "" > api/crates/rux-auth/src/lib.rs \
-    && echo "" > api/migration/src/lib.rs
-RUN cd api && cargo fetch --locked
-
-FROM deps AS builder
-COPY api api
-WORKDIR /workspace/api
+# Build straight from the real sources. An earlier revision had a separate
+# "deps" stage that copied only manifests, stubbed lib.rs/main.rs, and ran
+# `cargo fetch` to warm a download-cache layer. That stubbed resolution differs
+# from the committed Cargo.lock, and the CARGO_HOME it populated carried into
+# the builder and made the real `cargo build --release --locked` reject the
+# lock. Building from real sources keeps resolution identical to the lock. The
+# resulting image is still layer-cached across `docker compose build` runs.
+FROM base AS builder
+COPY backend/api backend/api
+COPY crates/ruxlog-types crates/ruxlog-types
+WORKDIR /workspace/backend/api
 ENV RUSTFLAGS="-C strip=symbols"
 RUN cargo build --release --locked
 
@@ -30,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 appuser
-COPY --from=builder /workspace/api/target/release/ruxlog /app/ruxlog
+COPY --from=builder /workspace/backend/api/target/release/ruxlog /app/ruxlog
 USER appuser
 EXPOSE 8888
 CMD ["/app/ruxlog"]

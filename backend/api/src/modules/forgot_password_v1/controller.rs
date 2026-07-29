@@ -235,9 +235,15 @@ pub async fn generate(
         Ok(verification) => {
             if verification.is_in_delay() {
                 warn!(user_id, "Forgot password in delay period");
-                return Err(ErrorResponse::new(ErrorCode::TooManyAttempts).with_message(
-                    "You have already requested a verification code. Please try again after 1 minute",
-                ));
+                return Err(ErrorResponse::new(ErrorCode::TooManyAttempts)
+                    .with_message(
+                        "You have already requested a verification code. Please try again after 1 minute",
+                    )
+                    // AUTH_007 parity: every TooManyAttempts 429 carries a
+                    // Retry-After, matching `abuse_limiter::map_limiter_result`.
+                    // The resend delay window is `forgot_password::Entity::DELAY_TIME`
+                    // (60s), which the message text above also promises.
+                    .with_retry_after(60));
             }
         }
         Err(err) => {

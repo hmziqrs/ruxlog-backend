@@ -1,4 +1,5 @@
 use crate::error::{DbResult, ErrorCode, ErrorResponse};
+use ruxlog_types::PaginatedList;
 use sea_orm::{entity::prelude::*, Condition, Order, QueryOrder, Set};
 
 use super::*;
@@ -142,7 +143,7 @@ impl Entity {
         }
     }
 
-    pub async fn find_with_query(conn: &DbConn, query: TagQuery) -> DbResult<(Vec<Model>, u64)> {
+    pub async fn find_with_query(conn: &DbConn, query: TagQuery) -> DbResult<PaginatedList<Model>> {
         let mut tag_query = Self::find();
 
         if let Some(search_term) = query.search {
@@ -201,7 +202,7 @@ impl Entity {
 
         match paginator.num_items().await {
             Ok(total) => match paginator.fetch_page(page - 1).await {
-                Ok(results) => Ok((results, total)),
+                Ok(results) => Ok(PaginatedList::new(results, total, page, Self::PER_PAGE)),
                 Err(err) => Err(err.into()),
             },
             Err(err) => Err(err.into()),

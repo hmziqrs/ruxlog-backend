@@ -1,4 +1,5 @@
 use crate::error::{DbResult, ErrorCode, ErrorResponse};
+use ruxlog_types::PaginatedList;
 use sea_orm::{
     entity::prelude::*, prelude::Expr, sea_query::Alias, Condition, JoinType, Order, QueryOrder,
     QuerySelect, Set, TransactionTrait,
@@ -399,7 +400,7 @@ impl Entity {
         conn: &DbConn,
         public_url: &str,
         query: CategoryQuery,
-    ) -> DbResult<(Vec<CategoryWithRelations>, u64)> {
+    ) -> DbResult<PaginatedList<CategoryWithRelations>> {
         use super::super::media::url::public_file_url_expr;
 
         let mut category_query = Self::find()
@@ -568,6 +569,6 @@ impl Entity {
             .map(|r| r.into_relation())
             .collect::<Vec<CategoryWithRelations>>();
 
-        Ok((results, total))
+        Ok(PaginatedList::new(results, total, page, Self::PER_PAGE))
     }
 }

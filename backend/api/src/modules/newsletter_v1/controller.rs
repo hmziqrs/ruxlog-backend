@@ -98,8 +98,7 @@ pub async fn subscribe(
     match SubscriberEntity::create(&state.sea_db, new_sub).await {
         Ok(_model) => {
             info!(email = %email, "Newsletter subscription created");
-            let site_url =
-                std::env::var("SITE_URL").unwrap_or_else(|_| "http://localhost:8888".to_string());
+            let site_url = state.settings.site.url.clone();
 
             // CRYP-GAP-012 / CRYP-RNG-005: do NOT carry the secret token in the
             // URL query string (`?token=`), where it leaks into access logs,
@@ -268,15 +267,15 @@ pub async fn list_subscribers(
     let query = payload.0.clone().into_query();
 
     match SubscriberEntity::find_with_query(&state.sea_db, query).await {
-        Ok((items, total)) => {
+        Ok(result) => {
             info!(
-                total,
+                total = result.total,
                 page = payload.page_or_default(),
                 "Admin listed newsletter subscribers"
             );
             Ok(Json(json!({
-                "data": items,
-                "total": total,
+                "data": result.data,
+                "total": result.total,
                 "per_page": SubscriberEntity::PER_PAGE,
                 "page": payload.page_or_default()
             })))

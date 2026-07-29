@@ -1,4 +1,5 @@
 use crate::error::{DbResult, ErrorResponse};
+use ruxlog_types::PaginatedList;
 use sea_orm::{entity::prelude::*, Condition, Order, QueryOrder, QuerySelect, Set};
 use tracing::{error, info, instrument, warn};
 
@@ -137,7 +138,7 @@ impl Entity {
     pub async fn find_with_query(
         conn: &DbConn,
         query: MediaQuery,
-    ) -> DbResult<(Vec<MediaWithUsage>, u64)> {
+    ) -> DbResult<PaginatedList<MediaWithUsage>> {
         let mut media_query = Self::find();
 
         if let Some(search_term) = query.search {
@@ -247,7 +248,7 @@ impl Entity {
                         })
                         .collect();
 
-                    Ok((results_with_usage, total))
+                    Ok(PaginatedList::new(results_with_usage, total, page, Self::PER_PAGE))
                 }
                 Err(err) => Err(err.into()),
             },

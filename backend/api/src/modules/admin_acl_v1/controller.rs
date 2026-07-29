@@ -67,37 +67,27 @@ pub async fn list_constants(
         value_type: query.value_type,
     };
 
-    let result = AclService::list_constants(State(state), params).await;
+    let result = AclService::list_constants(State(state), params).await?;
 
-    match result {
-        Ok((items, total)) => {
-            info!(count = items.len(), "Listed ACL constants");
-            let sanitized: Vec<serde_json::Value> = items
-                .into_iter()
-                .map(|item| {
-                    json!({
-                        "key": item.key,
-                        "value": if item.is_sensitive { serde_json::Value::String("********".into()) } else { serde_json::Value::String(item.value) },
-                        "value_type": item.value_type,
-                        "description": item.description,
-                        "is_sensitive": item.is_sensitive,
-                        "source": item.source,
-                        "updated_at": item.updated_at,
-                        "created_at": item.created_at,
-                        "updated_by": item.updated_by,
-                    })
-                })
-                .collect();
+    // Sanitize each constant (mask sensitive values) while preserving the
+    // pagination metadata via `PaginatedList::map`. The serialized shape stays
+    // exactly {data,total,page,per_page}.
+    let sanitized = result.map(|item| {
+        json!({
+            "key": item.key,
+            "value": if item.is_sensitive { serde_json::Value::String("********".into()) } else { serde_json::Value::String(item.value) },
+            "value_type": item.value_type,
+            "description": item.description,
+            "is_sensitive": item.is_sensitive,
+            "source": item.source,
+            "updated_at": item.updated_at,
+            "created_at": item.created_at,
+            "updated_by": item.updated_by,
+        })
+    });
 
-            Ok(Json(json!({
-                "data": sanitized,
-                "total": total,
-                "page": query.page.unwrap_or(1),
-                "per_page": query.per_page.unwrap_or(20)
-            })))
-        }
-        Err(err) => Err(err),
-    }
+    info!(count = sanitized.data.len(), "Listed ACL constants");
+    Ok(Json(sanitized))
 }
 
 #[debug_handler]

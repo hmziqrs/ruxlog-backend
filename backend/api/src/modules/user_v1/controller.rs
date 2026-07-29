@@ -93,7 +93,7 @@ pub async fn admin_create(
     }
 
     let payload = payload.0.into_new_user();
-    let user = User::admin_create(&state.sea_db, &state.object_storage.public_url, payload).await?;
+    let user = User::admin_create(&state.sea_db, &state.storage.config.public_url, payload).await?;
     info!(user_id = user.id, "Admin created user");
     Ok((StatusCode::CREATED, Json(json!(user))))
 }
@@ -209,7 +209,7 @@ pub async fn admin_update(
     let payload = payload.0.into_update_user();
     match User::admin_update(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         user_id,
         payload,
     )
@@ -278,8 +278,10 @@ pub async fn admin_list(
     let query = payload.0.into_user_query();
     let page = query.page.unwrap_or(1);
 
-    let (users, total) =
-        User::admin_list(&state.sea_db, &state.object_storage.public_url, query).await?;
+    let result =
+        User::admin_list(&state.sea_db, &state.storage.config.public_url, query).await?;
+    let users = result.data;
+    let total = result.total;
     info!(total, page, "Admin listed users");
     Ok((
         StatusCode::OK,
@@ -299,7 +301,7 @@ pub async fn admin_view(
     state: State<AppState>,
     Path(user_id): Path<i32>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
-    match User::find_by_id_with_relations(&state.sea_db, &state.object_storage.public_url, user_id)
+    match User::find_by_id_with_relations(&state.sea_db, &state.storage.config.public_url, user_id)
         .await
     {
         Ok(user) => {

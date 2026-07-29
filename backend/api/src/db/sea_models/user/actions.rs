@@ -2,6 +2,7 @@ use crate::{
     db::sea_models::email_verification,
     error::{DbResult, ErrorCode, ErrorResponse},
 };
+use ruxlog_types::PaginatedList;
 use sea_orm::{
     entity::prelude::*, prelude::Expr, sea_query::Alias, JoinType, Order, QueryOrder, QuerySelect,
     Set, TransactionTrait,
@@ -604,7 +605,7 @@ impl Entity {
         conn: &DbConn,
         public_url: &str,
         query: AdminUserQuery,
-    ) -> DbResult<(Vec<UserWithRelations>, u64)> {
+    ) -> DbResult<PaginatedList<UserWithRelations>> {
         use super::super::media::url::public_file_url_expr;
 
         let mut user_query = Self::find()
@@ -731,7 +732,7 @@ impl Entity {
                 Ok(results) => {
                     let users_with_relations =
                         results.into_iter().map(|r| r.into_relation()).collect();
-                    Ok((users_with_relations, total))
+                    Ok(PaginatedList::new(users_with_relations, total, page, Self::PER_PAGE))
                 }
                 Err(err) => Err(err.into()),
             },

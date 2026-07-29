@@ -1,4 +1,5 @@
 use crate::error::{DbResult, ErrorCode, ErrorResponse};
+use ruxlog_types::PaginatedList;
 use sea_orm::entity::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Order, QueryOrder, QuerySelect, Statement};
 use tracing::{instrument, warn};
@@ -118,7 +119,7 @@ impl Entity {
     pub async fn find_with_query(
         conn: &DbConn,
         query: SuppressionQuery,
-    ) -> DbResult<(Vec<SuppressionListItem>, u64)> {
+    ) -> DbResult<PaginatedList<SuppressionListItem>> {
         let mut q = Self::find().select_only().columns([
             Column::Id,
             Column::Recipient,
@@ -152,7 +153,7 @@ impl Entity {
         let total = paginator.num_items().await?;
         let items = paginator.fetch_page(page - 1).await?;
 
-        Ok((items, total))
+        Ok(PaginatedList::new(items, total, page, Self::PER_PAGE))
     }
 
     /// Find a row by id (admin detail) or a 404 error.

@@ -3,6 +3,7 @@ use crate::db::sea_models::app_constant::Model as AppConstantModel;
 use crate::error::{ErrorCode, ErrorResponse};
 use crate::state::AppState;
 use axum::extract::State;
+use ruxlog_types::PaginatedList;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::error::Error;
@@ -220,7 +221,7 @@ impl AclService {
     pub async fn list_constants(
         State(state): State<AppState>,
         params: ConstantsListParams,
-    ) -> Result<(Vec<AppConstantModel>, u64), ErrorResponse> {
+    ) -> Result<PaginatedList<AppConstantModel>, ErrorResponse> {
         let page = params.page.unwrap_or(1);
         let per_page = params.per_page.unwrap_or(20);
         AppConstant::list(

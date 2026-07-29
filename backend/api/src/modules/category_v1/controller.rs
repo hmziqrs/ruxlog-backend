@@ -30,7 +30,7 @@ pub async fn create(
 
     match Category::create(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         new_category,
     )
     .await
@@ -60,7 +60,7 @@ pub async fn update(
 
     match Category::update(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         category_id,
         update_category,
     )
@@ -136,7 +136,7 @@ pub async fn find_by_id_or_slug(
         }
     }
 
-    match Category::find_by_id_or_slug(&state.sea_db, &state.object_storage.public_url, id, slug)
+    match Category::find_by_id_or_slug(&state.sea_db, &state.storage.config.public_url, id, slug)
         .await
     {
         Ok(Some(category)) => {
@@ -186,18 +186,18 @@ pub async fn find_with_query(
 
     match Category::find_with_query(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         category_query,
     )
     .await
     {
-        Ok((categories, total)) => {
-            info!(total, page, "Categories retrieved with query");
+        Ok(result) => {
+            info!(total = result.total, page, "Categories retrieved with query");
             Ok((
                 StatusCode::OK,
                 Json(json!({
-                    "data": categories,
-                    "total": total,
+                    "data": result.data,
+                    "total": result.total,
                     "per_page": Category::PER_PAGE,
                     "page": page,
                 })),

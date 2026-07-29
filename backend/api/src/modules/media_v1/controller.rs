@@ -292,10 +292,10 @@ pub async fn create(
     // an operator who prefers fail-closed can move this `Err` branch to a
     // rejection. Mirrors the graceful-degradation used for FCM (missing config
     // skips push rather than blocking notifications). When the feature is on but
-    // no provider is configured (`state.image_moderator` is None), the block is
+    // no provider is configured (`state.storage.image_moderator` is None), the block is
     // skipped entirely and uploads behave as the NoOp default.
     #[cfg(feature = "image-moderation")]
-    if let Some(moderator) = state.image_moderator.as_ref() {
+    if let Some(moderator) = state.storage.image_moderator.as_ref() {
         match moderator.classify(&file_bytes, &declared_mime).await {
             Ok(verdict) => {
                 if !verdict.safe {
@@ -386,7 +386,7 @@ pub async fn create(
         let req_reference = metadata.reference_type;
         let req_mime = mime_type.clone();
         let req_ext = extension.clone();
-        let optimizer_cfg = state.optimizer.clone();
+        let optimizer_cfg = state.storage.optimizer.clone();
         let optimization_outcome = match tokio::task::spawn_blocking(move || {
             let optimization_request = image_optimizer::OptimizationRequest {
                 bytes: &req_bytes,
@@ -456,9 +456,10 @@ pub async fn create(
     let byte_stream = ByteStream::from(final_bytes.clone().to_vec());
 
     state
-        .s3_client
+        .storage
+        .client
         .put_object()
-        .bucket(&state.object_storage.bucket)
+        .bucket(&state.storage.config.bucket)
         .key(&object_key)
         .body(byte_stream)
         .content_type(&content_type)
@@ -510,9 +511,10 @@ pub async fn create(
         });
 
         if let Err(err) = state
-            .s3_client
+            .storage
+            .client
             .put_object()
-            .bucket(&state.object_storage.bucket)
+            .bucket(&state.storage.config.bucket)
             .key(&variant_key)
             .body(ByteStream::from(variant.bytes.to_vec()))
             .content_type(&variant.mime_type)
@@ -527,7 +529,7 @@ pub async fn create(
     }
 
     let new_media = NewMedia {
-        bucket: state.object_storage.bucket.clone(),
+        bucket: state.storage.config.bucket.clone(),
         object_key,
         mime_type: content_type,
         width: metadata.width,
@@ -543,7 +545,7 @@ pub async fn create(
 
     let stored = Media::create(&state.sea_db, new_media).await?;
     let file_url = crate::db::sea_models::media::url::build_public_file_url(
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         stored.bucket.as_deref(),
         &stored.object_key,
     );
@@ -624,7 +626,7 @@ pub async fn view(
             }
 
             let file_url = crate::db::sea_models::media::url::build_public_file_url(
-                &state.object_storage.public_url,
+                &state.storage.config.public_url,
                 media.media.bucket.as_deref(),
                 &media.media.object_key,
             );
@@ -662,12 +664,14 @@ pub async fn find_with_query(
     let query = payload.0.into_query(caller.id, caller.is_moderator());
     let page = query.page.unwrap_or(1);
 
-    let (items, total) = Media::find_with_query(&state.sea_db, query).await?;
-    let data = items
+    let result = Media::find_with_query(&state.sea_db, query).await?;
+    let total = result.total;
+    let data = result
+        .data
         .into_iter()
         .map(|item| {
             let file_url = crate::db::sea_models::media::url::build_public_file_url(
-                &state.object_storage.public_url,
+                &state.storage.config.public_url,
                 item.media.bucket.as_deref(),
                 &item.media.object_key,
             );
@@ -846,7 +850,7 @@ pub async fn list_usage_details(
         let media = media_records.get(&media_id).cloned();
         let file_url = media.as_ref().map(|media| {
             crate::db::sea_models::media::url::build_public_file_url(
-                &state.object_storage.public_url,
+                &state.storage.config.public_url,
                 media.bucket.as_deref(),
                 &media.object_key,
             )
@@ -900,13 +904,14 @@ pub async fn delete(
     }
 
     state
-        .s3_client
+        .storage
+        .client
         .delete_object()
         .bucket(
             media
                 .bucket
                 .as_deref()
-                .unwrap_or(state.object_storage.bucket.as_str()),
+                .unwrap_or(state.storage.config.bucket.as_str()),
         )
         .key(&media.object_key)
         .send()

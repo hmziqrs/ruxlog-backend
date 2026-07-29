@@ -152,7 +152,7 @@ pub async fn finish_oauth_login(
     // `auth.login` cycles the session id, so save first to materialize it.
     if (auth.session().save().await).is_ok() {
         if let (Some(row), Some(tower_sid)) = (session_row.as_ref(), auth.session().id()) {
-            crate::modules::auth_v1::controller::record_session_mapping(
+            crate::services::auth::record_session_mapping(
                 &state.redis_pool,
                 row.id,
                 &tower_sid.to_string(),

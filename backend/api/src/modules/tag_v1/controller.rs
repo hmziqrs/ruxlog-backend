@@ -184,13 +184,13 @@ pub async fn find_with_query(
     let page = tag_query.page.unwrap_or(1);
 
     match Tag::find_with_query(&state.sea_db, tag_query).await {
-        Ok((tags, total)) => {
-            info!(total, page, "Tags retrieved with query");
+        Ok(result) => {
+            info!(total = result.total, page, "Tags retrieved with query");
             Ok((
                 StatusCode::OK,
                 Json(json!({
-                    "data": tags,
-                    "total": total,
+                    "data": result.data,
+                    "total": result.total,
                     "per_page": Tag::PER_PAGE,
                     "page": page,
                 })),

@@ -236,6 +236,22 @@ fn parse_otlp_headers(headers_str: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// Whether the Quickwit/OTLP OpenTelemetry export pipelines should be
+/// initialized at boot.
+///
+/// Default-OFF: when `ENABLE_QUICKWIT_OTEL` is unset (the normal case) we skip
+/// the OTLP traces/metrics/logs exporters and run only the local `tracing` fmt
+/// layer — exactly the pre-env-gate behavior (which was a compile-time-disabled
+/// `if false { ... }` block). Setting `ENABLE_QUICKWIT_OTEL=1` (or `true`,
+/// case-insensitive) turns the OTLP exporters on. Any other value, including
+/// `0`/`false`/the empty string, leaves it disabled.
+fn quickwit_otel_enabled() -> bool {
+    match env::var("ENABLE_QUICKWIT_OTEL").ok() {
+        Some(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"),
+        None => false,
+    }
+}
+
 pub fn init() -> TelemetryGuard {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -246,7 +262,7 @@ pub fn init() -> TelemetryGuard {
         .with_line_number(true)
         .with_filter(env_filter);
 
-    if false {
+    if quickwit_otel_enabled() {
         let endpoint = env::var("QUICKWIT_INGEST_URL")
             .unwrap_or_else(|_| "http://localhost:7280".to_string())
             .trim_end_matches('/')

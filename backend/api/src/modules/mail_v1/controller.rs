@@ -33,7 +33,7 @@ use super::validator::{V1CreateSuppression, V1DeleteSuppression, V1ListSuppressi
 use {
     crate::{
         db::sea_models::email_suppression::{SuppressionReason, SuppressionUpsert},
-        services::{abuse_limiter, mail::provider::WebhookEvent},
+        services::{mail::provider::WebhookEvent},
     },
     sha2::{Digest, Sha256},
 };
@@ -45,16 +45,15 @@ pub async fn list_suppressions(
     State(state): State<AppState>,
     Query(q): Query<V1ListSuppressionsQuery>,
 ) -> Result<Json<serde_json::Value>, ErrorResponse> {
-    let page = q.page.unwrap_or(1);
     let query = SuppressionQuery {
         page: q.page,
         reason: q.reason,
         permanent: q.permanent,
         search: q.search,
     };
-    let (items, total) = SuppressionEntity::find_with_query(&state.sea_db, query).await?;
+    let result = SuppressionEntity::find_with_query(&state.sea_db, query).await?;
     Ok(Json(
-        json!({ "items": items, "total": total, "page": page }),
+        json!({ "data": result.data, "total": result.total, "page": result.page, "per_page": result.per_page }),
     ))
 }
 
@@ -142,10 +141,7 @@ pub async fn mail_webhook_receiver(
             provider,
             hex::encode(hasher.finalize())
         );
-        if !abuse_limiter::dedup_nx(&state.redis_pool, &dedup_key, 86_400)
-            .await
-            .unwrap_or(true)
-        {
+        if !rux_request_gate::dedup_nx(&state.redis_pool, &dedup_key, 86_400).await {
             tracing::info!(%provider, "Duplicate mail webhook (already processed); acknowledging");
             return Ok(Json(json!({ "received": true, "duplicate": true })));
         }

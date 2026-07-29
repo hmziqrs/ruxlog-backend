@@ -4,6 +4,7 @@ use sea_orm::{
 };
 
 use crate::error::DbResult;
+use ruxlog_types::PaginatedList;
 
 use super::*;
 
@@ -120,7 +121,7 @@ impl Entity {
         status: ScheduledPostStatus,
         page: Option<u64>,
         per_page: Option<u64>,
-    ) -> DbResult<(Vec<Model>, u64)> {
+    ) -> DbResult<PaginatedList<Model>> {
         let per_page = per_page.unwrap_or(Self::PER_PAGE);
         let page = match page {
             Some(p) if p > 0 => p,
@@ -136,6 +137,6 @@ impl Entity {
         let total = paginator.num_items().await?;
         let items = paginator.fetch_page(page - 1).await?;
 
-        Ok((items, total))
+        Ok(PaginatedList::new(items, total, page, per_page))
     }
 }

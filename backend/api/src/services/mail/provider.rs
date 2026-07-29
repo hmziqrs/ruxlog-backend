@@ -56,15 +56,13 @@ pub struct SendReceipt {
 }
 
 /// Incoming webhook event from a provider (raw body + full headers, because
-/// every provider signs differently). Copy of the billing shape so the
-/// receiver/verifier is uniform.
-#[derive(Debug, Clone)]
-pub struct WebhookEvent {
-    pub provider: String,
-    pub payload: Vec<u8>,
-    pub headers: axum::http::HeaderMap,
-    pub query: Option<String>,
-}
+/// every provider signs differently).
+///
+/// This shape is shared with the billing stack, so it lives in
+/// `rux-provider-core` and is re-exported here so every existing
+/// `use super::provider::WebhookEvent` / `crate::services::mail::provider::WebhookEvent`
+/// import keeps resolving unchanged.
+pub use rux_provider_core::WebhookEvent;
 
 /// Canonical mail event vocabulary. Each provider's `verify_webhook` translates
 /// its native event into one of these so the dispatch is provider-agnostic.
@@ -116,6 +114,14 @@ pub trait MailProvider: Send + Sync {
     }
 }
 
+/// Every [`MailProvider`] object is a [`rux_provider_core::Provider`]. This
+/// opts the dyn-trait into the framework marker so `ProviderRegistry<dyn
+/// MailProvider>` (used by [`crate::services::mail::router::MailRouter`])
+/// satisfies its `P: Provider` bound. The marker carries no methods, so the 15
+/// existing `impl MailProvider for ...` blocks compile unchanged and
+/// `obj.provider_name()` on a `dyn MailProvider` stays unambiguous.
+impl rux_provider_core::Provider for dyn MailProvider {}
+
 /// Errors from mail operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MailError {
@@ -152,4 +158,22 @@ pub enum MailError {
 
     #[error("{0}")]
     Other(String),
+}
+
+/// Narrow the shared [`rux_provider_core::FrameworkError`] (returned by
+/// `ProviderRegistry` lookups) into [`MailError`], preserving mail's exact
+/// error variant + message conventions — in particular a missing provider
+/// stays `MailError::Config("mail provider '{name}' not initialized")` (drift
+/// point #1 vs billing, which uses a different mapping for its webhook path).
+impl From<rux_provider_core::FrameworkError> for MailError {
+    fn from(err: rux_provider_core::FrameworkError) -> Self {
+        match err {
+            rux_provider_core::FrameworkError::ProviderNotRegistered(name) => {
+                MailError::Config(format!("mail provider '{name}' not initialized"))
+            }
+            rux_provider_core::FrameworkError::Config(msg) => MailError::Config(msg),
+            rux_provider_core::FrameworkError::ProviderApi(msg) => MailError::ProviderApi(msg),
+            rux_provider_core::FrameworkError::Other(msg) => MailError::Other(msg),
+        }
+    }
 }

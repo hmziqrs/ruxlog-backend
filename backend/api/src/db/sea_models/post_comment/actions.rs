@@ -1,4 +1,5 @@
 use crate::error::DbResult;
+use ruxlog_types::PaginatedList;
 use sea_orm::{entity::prelude::*, Order, QueryOrder, Set};
 use tracing::{error, info, instrument, warn};
 
@@ -199,7 +200,7 @@ impl Entity {
         conn: &DbConn,
         public_url: &str,
         query: CommentQuery,
-    ) -> DbResult<(Vec<CommentWithUser>, u64)> {
+    ) -> DbResult<PaginatedList<CommentWithUser>> {
         use super::super::media::url::public_file_url_expr;
         use super::super::user::Column as UserColumn;
         use sea_orm::prelude::Expr;
@@ -350,7 +351,7 @@ impl Entity {
             .map(|c| c.into_comment_with_user())
             .collect();
 
-        Ok((models, total))
+        Ok(PaginatedList::new(models, total, page, Self::PER_PAGE))
     }
 
     pub async fn count_by_post_id(conn: &DbConn, post_id: i32) -> DbResult<i64> {

@@ -143,7 +143,9 @@ pub async fn list_routes(
     let page = route_query.page.unwrap_or(1);
 
     match RouteStatus::search(&state.sea_db, route_query).await {
-        Ok((routes, total)) => {
+        Ok(result) => {
+            let routes = result.data;
+            let total = result.total;
             info!(total, page, "Routes retrieved with query");
             Ok((
                 StatusCode::OK,

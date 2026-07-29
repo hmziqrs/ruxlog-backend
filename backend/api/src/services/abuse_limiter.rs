@@ -1,302 +1,132 @@
-use tower_sessions_redis_store::fred::interfaces::LuaInterface;
-use tower_sessions_redis_store::fred::prelude::Pool as RedisPool;
-use tower_sessions_redis_store::fred::types::{FromValue, Value};
-use tracing::{debug, error, info, instrument, warn};
+//! ruxlog adapter over the [`rux_request_gate`] crate.
+//!
+//! The rate-limiting / abuse-limiting *logic* now lives in the standalone,
+//! domain-free [`rux_request_gate`] crate. This module is the thin ruxlog-side
+//! adapter kept at the historical `services::abuse_limiter` path so existing
+//! call sites compile unchanged. It maps the crate's [`LimiterDecision`] /
+//! [`rux_request_gate::GateError`] onto the app's [`ErrorResponse`] and bridges
+//! the crate's observability hooks to ruxlog's OpenTelemetry counters.
+//!
+//! `limiter()` keeps its exact pre-extraction signature, so the controller call
+//! sites are untouched. `dedup_nx` / `release_dedup` / `check` are consumed
+//! directly from the crate (their signatures changed; callers updated).
+
+use serde_json::json;
 
 use crate::error::{ErrorCode, ErrorResponse};
 use crate::utils::telemetry;
 
-#[derive(Clone, Copy, Debug)]
-pub struct AbuseLimiterConfig {
-    pub temp_block_attempts: usize,
-    pub temp_block_range: usize,    // seconds
-    pub temp_block_duration: usize, // seconds
-    pub block_retry_limit: usize,   // long threshold
-    pub block_range: usize,         // seconds
-    pub block_duration: usize,      // seconds
-}
+pub use rux_request_gate::{AbuseLimiterConfig, BlockScope, LimiterDecision};
 
-#[derive(Debug, Clone, Copy)]
-pub enum BlockScope {
-    Temp,
-    Long,
-}
+/// OpenTelemetry bridge: forwards the crate's limiter callbacks to ruxlog's
+/// `limiter.*` counters (the counters that previously lived inline here).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TelemetryHooks;
 
-#[derive(Debug, Clone)]
-pub enum LimiterDecision {
-    Allowed {
-        short_count: u64,
-        long_count: u64,
-    },
-    Blocked {
+impl rux_request_gate::LimiterHooks for TelemetryHooks {
+    fn on_check(&self) {
+        telemetry::limiter_metrics().checks.add(1, &[]);
+    }
+    fn on_allowed(&self, _short_count: u64, _long_count: u64) {
+        telemetry::limiter_metrics().allowed.add(1, &[]);
+    }
+    fn on_blocked(
+        &self,
         scope: BlockScope,
-        retry_after_secs: u64,
-        short_count: u64,
-        long_count: u64,
-    },
-}
-
-const LUA_SCRIPT: &str = r#"
--- KEYS: attempts_key, block_key, seq_key
--- ARGV: temp_window, temp_threshold, temp_block_duration, long_window, long_threshold, long_block_duration, attempts_ttl
-
-local attempts_key = KEYS[1]
-local block_key = KEYS[2]
-local seq_key = KEYS[3]
-
-local temp_window = tonumber(ARGV[1])
-local temp_threshold = tonumber(ARGV[2])
-local temp_block_duration = tonumber(ARGV[3])
-local long_window = tonumber(ARGV[4])
-local long_threshold = tonumber(ARGV[5])
-local long_block_duration = tonumber(ARGV[6])
-local attempts_ttl = tonumber(ARGV[7])
-
-local now = redis.call('TIME')
-local now_sec = tonumber(now[1])
-
--- If already blocked, return the remaining TTL immediately
-local existing_ttl = redis.call('TTL', block_key)
-if existing_ttl and existing_ttl > 0 then
-  -- Maintain attempts bookkeeping (optional): push the attempt but do not affect block state
-  local seq = redis.call('INCR', seq_key)
-  redis.call('EXPIRE', seq_key, attempts_ttl)
-  local member = string.format('%d:%d', now_sec, seq)
-  redis.call('ZADD', attempts_key, now_sec, member)
-  redis.call('EXPIRE', attempts_key, attempts_ttl)
-  local short_count = redis.call('ZCOUNT', attempts_key, now_sec - temp_window, now_sec)
-  local long_count  = redis.call('ZCOUNT', attempts_key, now_sec - long_window, now_sec)
-  return {0, existing_ttl, short_count, long_count, 'existing'}
-end
-
-local max_window = math.max(temp_window, long_window)
-redis.call('ZREMRANGEBYSCORE', attempts_key, '-inf', now_sec - max_window)
-
-local seq = redis.call('INCR', seq_key)
-redis.call('EXPIRE', seq_key, attempts_ttl)
-local member = string.format('%d:%d', now_sec, seq)
-redis.call('ZADD', attempts_key, now_sec, member)
-redis.call('EXPIRE', attempts_key, attempts_ttl)
-
-local short_count = redis.call('ZCOUNT', attempts_key, now_sec - temp_window, now_sec)
-local long_count  = redis.call('ZCOUNT', attempts_key, now_sec - long_window, now_sec)
-
-if short_count >= temp_threshold then
-  redis.call('SET', block_key, '1', 'EX', temp_block_duration, 'NX')
-  local ttl = redis.call('TTL', block_key)
-  if ttl < 0 then ttl = 0 end
-  return {0, ttl, short_count, long_count, 'temp'}
-elseif long_count >= long_threshold then
-  redis.call('SET', block_key, '1', 'EX', long_block_duration, 'NX')
-  local ttl = redis.call('TTL', block_key)
-  if ttl < 0 then ttl = 0 end
-  return {0, ttl, short_count, long_count, 'long'}
-else
-  return {1, 0, short_count, long_count, 'none'}
-end
-"#;
-
-// Helpers: convert fred Value into primitives using FromValue.
-#[inline]
-fn to_u64(v: &Value) -> Option<u64> {
-    u64::from_value(v.clone()).ok()
-}
-#[inline]
-fn to_string(v: &Value) -> Option<String> {
-    String::from_value(v.clone()).ok()
-}
-
-/// Execute the limiter in Redis via a single atomic Lua script.
-#[instrument(skip(redis_pool), fields(
-    scope = %key_prefix,
-    decision,
-    short_count,
-    long_count,
-    retry_after
-))]
-pub async fn check(
-    redis_pool: &RedisPool,
-    key_prefix: &str,
-    config: AbuseLimiterConfig,
-) -> Result<LimiterDecision, ErrorResponse> {
-    let metrics = telemetry::limiter_metrics();
-    metrics.checks.add(1, &[]);
-
-    debug!(
-        temp_threshold = config.temp_block_attempts,
-        temp_window = config.temp_block_range,
-        long_threshold = config.block_retry_limit,
-        long_window = config.block_range,
-        "Checking abuse limiter"
-    );
-    let attempts_key = format!("abuse_limiter:attempts:{}", key_prefix);
-    let block_key = format!("abuse_limiter:block:{}", key_prefix);
-    let seq_key = format!("abuse_limiter:seq:{}", key_prefix);
-
-    let attempts_ttl = std::cmp::max(config.temp_block_range, config.block_range) + 60; // slack 60s
-
-    let keys = vec![attempts_key, block_key, seq_key];
-    // fred 10 expects args TryInto<MultipleValues>. Vec<Value> is supported.
-    let args: Vec<Value> = vec![
-        Value::from(config.temp_block_range as i64),
-        Value::from(config.temp_block_attempts as i64),
-        Value::from(config.temp_block_duration as i64),
-        Value::from(config.block_range as i64),
-        Value::from(config.block_retry_limit as i64),
-        Value::from(config.block_duration as i64),
-        Value::from(attempts_ttl as i64),
-    ];
-
-    // Evaluate the script directly via the Pool. This avoids explicit SCRIPT LOAD.
-    let res: Result<Vec<Value>, _> = redis_pool.eval(LUA_SCRIPT, keys, args).await;
-    let values = match res {
-        Ok(v) => v,
-        Err(err) => {
-            error!(
-                error = %err,
-                key_prefix = %key_prefix,
-                "Redis error during limiter check"
-            );
-            return Err(ErrorResponse::new(ErrorCode::ServiceUnavailable)
-                .with_message("Limiter unavailable (Redis error)")
-                .with_details(err.to_string()));
+        _retry_after_secs: u64,
+        _short_count: u64,
+        _long_count: u64,
+    ) {
+        let m = telemetry::limiter_metrics();
+        m.blocked.add(1, &[]);
+        match scope {
+            BlockScope::Temp => m.temp_blocks.add(1, &[]),
+            BlockScope::Long => m.long_blocks.add(1, &[]),
         }
-    };
-
-    if values.len() != 5 {
-        error!(
-            value_count = values.len(),
-            key_prefix = %key_prefix,
-            "Unexpected Lua script result length"
-        );
-        return Err(ErrorResponse::new(ErrorCode::InternalServerError)
-            .with_message("Limiter returned unexpected result"));
     }
-
-    let allowed = to_u64(&values[0]).unwrap_or(0);
-    let retry_after = to_u64(&values[1]).unwrap_or(0);
-    let short_count = to_u64(&values[2]).unwrap_or(0);
-    let long_count = to_u64(&values[3]).unwrap_or(0);
-    let reason = to_string(&values[4]).unwrap_or_else(|| "none".to_string());
-
-    if allowed == 1 {
-        debug!(short_count, long_count, "Request allowed");
-        tracing::Span::current().record("decision", "allowed");
-        tracing::Span::current().record("short_count", short_count);
-        tracing::Span::current().record("long_count", long_count);
-
-        metrics.allowed.add(1, &[]);
-
-        return Ok(LimiterDecision::Allowed {
-            short_count,
-            long_count,
-        });
-    }
-
-    let scope = match reason.as_str() {
-        "temp" => BlockScope::Temp,
-        "long" => BlockScope::Long,
-        _ => BlockScope::Temp,
-    };
-
-    warn!(
-        scope = ?scope,
-        retry_after = retry_after,
-        short_count,
-        long_count,
-        reason = %reason,
-        "Request blocked by abuse limiter"
-    );
-
-    tracing::Span::current().record("decision", "blocked");
-    tracing::Span::current().record("short_count", short_count);
-    tracing::Span::current().record("long_count", long_count);
-    tracing::Span::current().record("retry_after", retry_after);
-
-    metrics.blocked.add(1, &[]);
-    match scope {
-        BlockScope::Temp => metrics.temp_blocks.add(1, &[]),
-        BlockScope::Long => metrics.long_blocks.add(1, &[]),
-    }
-
-    Ok(LimiterDecision::Blocked {
-        scope,
-        retry_after_secs: retry_after,
-        short_count,
-        long_count,
-    })
 }
 
-/// Backward-compatible wrapper preserving the original signature.
-#[instrument(skip(redis_pool), fields(scope = %key_prefix))]
+/// Abuse-limit check mapped onto `ErrorResponse` (see [`map_limiter_result`]
+/// for the response contract).
 pub async fn limiter(
-    redis_pool: &RedisPool,
+    redis_pool: &rux_request_gate::RedisPool,
     key_prefix: &str,
     config: AbuseLimiterConfig,
 ) -> Result<(), ErrorResponse> {
-    use serde_json::json;
-
-    match check(redis_pool, key_prefix, config).await? {
-        LimiterDecision::Allowed { .. } => {
-            info!("Access allowed");
-            Ok(())
-        }
-        LimiterDecision::Blocked {
-            retry_after_secs, ..
-        } => {
-            info!(
-                retry_after = retry_after_secs,
-                "Access denied - rate limited"
-            );
-            Err(ErrorResponse::new(ErrorCode::TooManyAttempts)
-                .with_message(format!(
-                    "Too many attempts. Try again in {} seconds.",
-                    retry_after_secs
-                ))
-                .with_retry_after(retry_after_secs)
-                .with_context(json!({ "retryAfter": retry_after_secs })))
-        }
-    }
+    let res = rux_request_gate::check(redis_pool, &TelemetryHooks, key_prefix, config).await;
+    map_limiter_result(res)
 }
 
-/// One-shot dedup gate: atomic `SET key 1 EX ttl NX`.
-///
-/// Returns `Ok(true)` when the key was newly created (the caller should proceed
-/// with the gated work) and `Ok(false)` when it already existed (the caller
-/// should short-circuit — the work was already recorded this window).
-///
-/// Used by `track_view` to bound DB writes to ≤1 per (post, ip) per window
-/// regardless of source-IP rotation (DOS-TRACKVIEW-2). Fail-OPEN on a Redis
-/// error: a dedup outage must not 5xx the public view tracker — the per-IP nest
-/// rate limit still bounds the floor.
-pub async fn dedup_nx(
-    redis_pool: &RedisPool,
-    key: &str,
-    ttl_secs: usize,
-) -> Result<bool, ErrorResponse> {
-    const DEDUP: &str = "return redis.call('SET', KEYS[1], '1', 'EX', ARGV[1], 'NX') and 1 or 0";
-    let keys = vec![key.to_string()];
-    let args: Vec<Value> = vec![Value::from(ttl_secs as i64)];
-    let res: Result<Vec<Value>, _> = redis_pool.eval(DEDUP, keys, args).await;
+/// Map a crate limiter result onto the app's `ErrorResponse` contract. Pure
+/// (no Redis) so the mapping is unit-tested directly:
+/// - `Allowed` -> `Ok`.
+/// - `Blocked` -> `ErrorCode::TooManyAttempts` (429) + `Retry-After` + context.
+/// - store error -> `ErrorCode::ServiceUnavailable` (503).
+/// - malformed result -> `ErrorCode::InternalServerError` (500).
+pub(crate) fn map_limiter_result(
+    res: Result<rux_request_gate::LimiterDecision, rux_request_gate::GateError>,
+) -> Result<(), ErrorResponse> {
+    use rux_request_gate::{GateError, LimiterDecision};
     match res {
-        Ok(v) => Ok(v.first().and_then(to_u64).unwrap_or(0) == 1),
-        Err(err) => {
-            warn!(error = %err, %key, "dedup check failed (fail-open)");
-            Ok(true)
-        }
+        Ok(LimiterDecision::Allowed { .. }) => Ok(()),
+        Ok(LimiterDecision::Blocked { retry_after_secs, .. }) => Err(ErrorResponse::new(ErrorCode::TooManyAttempts)
+            .with_message(format!(
+                "Too many attempts. Try again in {} seconds.",
+                retry_after_secs
+            ))
+            .with_retry_after(retry_after_secs)
+            .with_context(json!({ "retryAfter": retry_after_secs }))),
+        Err(GateError::StoreUnavailable(detail)) => Err(ErrorResponse::new(ErrorCode::ServiceUnavailable)
+            .with_message("Limiter unavailable (Redis error)")
+            .with_details(detail)),
+        Err(GateError::UnexpectedResult) => Err(ErrorResponse::new(ErrorCode::InternalServerError)
+            .with_message("Limiter returned unexpected result")),
     }
 }
 
-/// Release a dedup claim early (best-effort `DEL`) so a gated operation that
-/// failed after claiming — e.g. a newsletter send that was rate-limited — can be
-/// retried within the window instead of being suppressed as a duplicate. The
-/// claim marks *completed* work; releasing it on failure keeps that invariant.
-/// Fail-open/silent on a Redis error (the key simply TTLs out).
-pub async fn release_dedup(redis_pool: &RedisPool, key: &str) {
-    const DEL: &str = "return redis.call('DEL', KEYS[1])";
-    let keys = vec![key.to_string()];
-    let res: Result<Vec<Value>, _> = redis_pool.eval(DEL, keys, Vec::<Value>::new()).await;
-    if let Err(err) = res {
-        warn!(error = %err, %key, "dedup release failed (fail-open)");
+#[cfg(test)]
+mod tests {
+    //! Pin the limiter decision → ErrorResponse status mapping (the contract
+    //! the request-gate extraction must preserve), without needing Redis.
+    use super::*;
+    use axum::response::IntoResponse;
+    use rux_request_gate::{BlockScope, GateError, LimiterDecision};
+
+    #[test]
+    fn allowed_maps_ok() {
+        assert!(map_limiter_result(Ok(LimiterDecision::Allowed {
+            short_count: 1,
+            long_count: 0,
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn blocked_maps_to_429() {
+        let resp = map_limiter_result(Ok(LimiterDecision::Blocked {
+            scope: BlockScope::Temp,
+            retry_after_secs: 42,
+            short_count: 5,
+            long_count: 9,
+        }))
+        .unwrap_err()
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn store_unavailable_maps_to_503() {
+        let resp = map_limiter_result(Err(GateError::StoreUnavailable("boom".into())))
+            .unwrap_err()
+            .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn unexpected_result_maps_to_500() {
+        let resp = map_limiter_result(Err(GateError::UnexpectedResult))
+            .unwrap_err()
+            .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

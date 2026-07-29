@@ -13,7 +13,7 @@ use tracing::instrument;
 
 use crate::{
     db::sea_models::{
-        pagination::{paginate_query, PagedRaw},
+        pagination::{paginate_query, PaginatedList},
         post::PostStatus,
     },
     error::{ErrorCode, ErrorResponse},
@@ -152,7 +152,7 @@ pub async fn registration_trends(
         Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
     ];
 
-    let PagedRaw { rows, total } = paginate_query::<RegistrationTrendRow>(
+    let PaginatedList { data: rows, total, .. } = paginate_query::<RegistrationTrendRow>(
         &state.sea_db,
         &sql,
         params,
@@ -259,7 +259,7 @@ pub async fn verification_rates(
         Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
     ];
 
-    let PagedRaw { rows, total } = paginate_query::<VerificationRateRow>(
+    let PaginatedList { data: rows, total, .. } = paginate_query::<VerificationRateRow>(
         &state.sea_db,
         &sql,
         params,
@@ -510,7 +510,7 @@ pub async fn page_views(
         Value::Bool(Some(only_unique)),
     ];
 
-    let PagedRaw { rows, total } = paginate_query::<PageViewRow>(
+    let PaginatedList { data: rows, total, .. } = paginate_query::<PageViewRow>(
         &state.sea_db,
         &sql,
         params,
@@ -618,7 +618,7 @@ pub async fn comment_rate(
         Value::BigInt(Some(min_views)),
     ];
 
-    let PagedRaw { rows, total } = paginate_query::<CommentRateRow>(
+    let PaginatedList { data: rows, total, .. } = paginate_query::<CommentRateRow>(
         &state.sea_db,
         &sql,
         params,
@@ -727,7 +727,7 @@ pub async fn newsletter_growth(
         Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
     ];
 
-    let PagedRaw { rows, total } = paginate_query::<NewsletterGrowthRow>(
+    let PaginatedList { data: rows, total, .. } = paginate_query::<NewsletterGrowthRow>(
         &state.sea_db,
         &sql,
         params,
@@ -800,7 +800,7 @@ pub async fn media_upload_trends(
         Value::ChronoDateTimeWithTimeZone(Some(Box::new(resolved.date_to))),
     ];
 
-    let PagedRaw { rows, total } = paginate_query::<MediaUploadRow>(
+    let PaginatedList { data: rows, total, .. } = paginate_query::<MediaUploadRow>(
         &state.sea_db,
         &sql,
         params,

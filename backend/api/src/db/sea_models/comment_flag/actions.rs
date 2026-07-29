@@ -1,4 +1,5 @@
 use crate::error::DbResult;
+use ruxlog_types::PaginatedList;
 use sea_orm::{
     entity::prelude::*, ColumnTrait, EntityTrait, JoinType, Order, QueryFilter, QueryOrder,
     QuerySelect, Set,
@@ -48,7 +49,7 @@ impl Entity {
         conn: &DbConn,
         public_url: &str,
         query: CommentFlagQuery,
-    ) -> DbResult<(Vec<FlagWithUser>, u64)> {
+    ) -> DbResult<PaginatedList<FlagWithUser>> {
         use super::super::media::url::public_file_url_expr;
         use super::super::user::Column as UserColumn;
         use sea_orm::prelude::Expr;
@@ -149,7 +150,7 @@ impl Entity {
             .map(|f| f.into_flag_with_user())
             .collect();
 
-        Ok((items, total))
+        Ok(PaginatedList::new(items, total, page, Self::PER_PAGE))
     }
 
     /// Return a summary for a specific comment's flags.

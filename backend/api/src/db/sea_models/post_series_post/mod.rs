@@ -92,6 +92,7 @@ pub mod slice {
 
 pub mod actions {
     use crate::error::DbResult;
+    use ruxlog_types::PaginatedList;
     use sea_orm::{
         entity::prelude::*, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
         TransactionTrait,
@@ -216,11 +217,10 @@ pub mod actions {
         }
 
         /// List mappings for a series ordered by sort_order asc, id asc.
-        /// Returns (items, total_count)
         pub async fn list_by_series(
             conn: &DbConn,
             query: SeriesPostsListQuery,
-        ) -> DbResult<(Vec<Model>, u64)> {
+        ) -> DbResult<PaginatedList<Model>> {
             let per_page = query.per_page.unwrap_or(Self::PER_PAGE);
             let page = match query.page {
                 Some(p) if p > 0 => p,
@@ -235,7 +235,7 @@ pub mod actions {
             let paginator = finder.paginate(conn, per_page);
             let total = paginator.num_items().await?;
             let items = paginator.fetch_page(page - 1).await?;
-            Ok((items, total))
+            Ok(PaginatedList::new(items, total, page, per_page))
         }
 
         /// Count mappings for a given series.

@@ -26,8 +26,10 @@ pub async fn list(
     let user = auth.user.unwrap(); // safe behind auth_guard::authenticated
     let page = payload.page.unwrap_or(1);
     let per_page = payload.per_page.unwrap_or(notification::Entity::PER_PAGE);
-    let (items, total) =
+    let result =
         notification::Entity::list_for_user(&state.sea_db, user.id, page, per_page).await?;
+    let items = result.data;
+    let total = result.total;
     Ok((
         StatusCode::OK,
         Json(json!({

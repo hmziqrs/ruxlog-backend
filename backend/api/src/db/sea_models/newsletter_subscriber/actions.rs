@@ -1,4 +1,5 @@
 use crate::error::{DbResult, ErrorCode, ErrorResponse};
+use ruxlog_types::PaginatedList;
 use sea_orm::{entity::prelude::*, Condition, Order, QueryOrder, QuerySelect, Set};
 use tracing::{error, info, instrument, warn};
 
@@ -130,7 +131,7 @@ impl Entity {
     pub async fn find_with_query(
         conn: &DbConn,
         query: SubscriberQuery,
-    ) -> DbResult<(Vec<SubscriberListItem>, u64)> {
+    ) -> DbResult<PaginatedList<SubscriberListItem>> {
         let mut q = Self::find().select_only().columns(vec![
             Column::Id,
             Column::Email,
@@ -189,7 +190,7 @@ impl Entity {
         let total = paginator.num_items().await?;
         let items = paginator.fetch_page(page - 1).await?;
 
-        Ok((items, total))
+        Ok(PaginatedList::new(items, total, page, Self::PER_PAGE))
     }
 
     pub async fn find_by_id_with_404(conn: &DbConn, subscriber_id: i32) -> DbResult<Model> {

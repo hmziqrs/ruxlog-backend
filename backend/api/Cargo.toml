@@ -283,6 +283,11 @@ path = "scripts/ruxlog_tui.rs"
 required-features = ["seed-system"]
 
 [[bin]]
+name = "seed_now"
+path = "scripts/seed_now.rs"
+required-features = ["seed-system"]
+
+[[bin]]
 name = "ruxlog-backfill-user-field-crypto"
 path = "scripts/backfill_user_field_crypto.rs"
 required-features = ["full"]

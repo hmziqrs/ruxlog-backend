@@ -53,6 +53,30 @@ fn main() {
     // `script-src 'self' 'nonce-<v>' 'wasm-unsafe-eval' 'unsafe-eval'`. See
     // `csp_nonce.rs` for the rationale and the safety-critical invariant.
     dioxus::server::serve(|| async {
+        // Server functions (e.g. `fetch_posts` -> POST /post/v1/list/published)
+        // execute on THIS SSR process, where there is no browser session cookie
+        // and no bootstrapped CSRF token — so the backend's `csrf_guard` would
+        // reject every mutating call with 401. Establish the server's own backend
+        // session once, inside the server runtime: `/csrf/v1/generate` is
+        // CSRF-exempt, materializes a session (its cookie is captured by oxcore's
+        // shared cookie jar), and returns the HMAC-bound token that is then
+        // attached to every request. Retried until the backend is reachable so
+        // startup ordering (consumer started before the API) cannot strand the
+        // home page at 401 indefinitely.
+        tokio::spawn(async {
+            loop {
+                match oxcore::http::refresh_csrf_token().await {
+                    Ok(()) => {
+                        tracing::info!("Server-side CSRF session bootstrapped");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Server CSRF bootstrap failed, retrying in 2s: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        });
         Ok(dioxus::server::router(App)
             .layer(axum::middleware::from_fn(csp_nonce::csp_nonce_middleware)))
     });

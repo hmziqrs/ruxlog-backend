@@ -53,13 +53,23 @@ const MAX_HTML_BODY: usize = 16 * 1024 * 1024;
 /// bytes is 24 chars, no padding.
 const NONCE_BYTES: usize = 18;
 
-/// The CSP applied to the SSR document, with the per-request nonce
-/// interpolated. `wasm-unsafe-eval` unblocks `WebAssembly.instantiateStreaming`;
-/// `unsafe-eval` unblocks dioxus-web's `new Function()` document eval. Neither
-/// weakens the stored-XSS control: they only gate eval/WASM entry from an
-/// already-running JS context, which `script-src 'self'` (no `'unsafe-inline'`)
-/// withholds from injected HTML. `frame-ancestors 'none'` is carried here as a
-/// real HTTP header (browsers ignore it in a `<meta>`).
+/// The CSP applied to the SSR document, with the per-request nonce and the
+/// runtime API origin interpolated. `wasm-unsafe-eval` unblocks
+/// `WebAssembly.instantiateStreaming`; `unsafe-eval` unblocks dioxus-web's
+/// `new Function()` document eval. Neither weakens the stored-XSS control: they
+/// only gate eval/WASM entry from an already-running JS context, which
+/// `script-src 'self'` (no `'unsafe-inline'`) withholds from injected HTML.
+/// `frame-ancestors 'none'` is carried here as a real HTTP header (browsers
+/// ignore it in a `<meta>`).
+///
+/// `connect-src` lists `'self'` plus the cross-origin backend API origin
+/// (`{CONNECT_ORIGINS}`, resolved at request time by [`api_connect_origin`]).
+/// The consumer WASM is served from the SSR origin (e.g. 127.0.0.1:1108) but
+/// legitimately fetches the axum API on a different origin (e.g. localhost:1100)
+/// — the CSRF-token bootstrap, server functions, media — so a bare
+/// `connect-src 'self'` blocks every such fetch. The origin is read from the
+/// same env (`APP_API_URL` / `SITE_URL`) the client's `env::APP_API_URL` is
+/// built from, so it is correct in both dev and prod.
 const CSP_TEMPLATE: &str = concat!(
     "default-src 'self'; ",
     "script-src 'self' 'nonce-{NONCE}' 'wasm-unsafe-eval' 'unsafe-eval'; ",
@@ -67,7 +77,7 @@ const CSP_TEMPLATE: &str = concat!(
     "font-src 'self' https://fonts.gstatic.com; ",
     "img-src 'self' data: https:; ",
     "media-src 'self'; ",
-    "connect-src 'self'; ",
+    "connect-src 'self' {CONNECT_ORIGINS}; ",
     "object-src 'none'; ",
     "base-uri 'self'; ",
     "frame-ancestors 'none'; ",
@@ -134,8 +144,43 @@ fn generate_nonce() -> String {
 }
 
 fn csp_value(nonce: &str) -> HeaderValue {
-    let raw = CSP_TEMPLATE.replace("{NONCE}", nonce);
+    let raw = CSP_TEMPLATE
+        .replace("{NONCE}", nonce)
+        .replace("{CONNECT_ORIGINS}", &api_connect_origin());
     HeaderValue::from_str(&raw).expect("CSP template renders to valid header ASCII")
+}
+
+/// Resolve the cross-origin backend API origin to allow in `connect-src`. The
+/// consumer WASM client fetches the axum API (CSRF bootstrap, server functions,
+/// media) from `env::APP_API_URL`, which is built from the `SITE_URL` env (see
+/// `env.rs`). We resolve the same value here at **request time** so the policy
+/// tracks the runtime environment (correct in prod, where the URL is usually
+/// set at container launch rather than baked in), falling back through the
+/// compile-time env the client was built with and then the `env::APP_API_URL`
+/// default — so the allow-list is never wrong-by-default.
+fn api_connect_origin() -> String {
+    let raw = std::env::var("APP_API_URL")
+        .ok()
+        .or_else(|| std::option_env!("SITE_URL").map(String::from))
+        .unwrap_or_else(|| "http://localhost:1100".to_string());
+    origin_of(&raw)
+}
+
+/// Reduce a URL to its CSP source origin (`scheme://host[:port]`) by dropping
+/// any path / query / fragment. CSP sources are origin-scoped, so a trailing
+/// path would silently narrow the allow-list. A schemeless value (`host:port`)
+/// is normalized to `http://`, mirroring `configure_http_client` in `main.rs`.
+fn origin_of(url: &str) -> String {
+    let (scheme, rest) = match url.find("://") {
+        Some(idx) => (&url[..idx], &url[idx + 3..]),
+        None => ("http", url),
+    };
+    let authority = rest
+        .split(|c| matches!(c, '/' | '?' | '#'))
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    format!("{scheme}://{authority}")
 }
 
 fn is_html_response(response: &Response) -> bool {
@@ -397,6 +442,38 @@ mod tests {
         assert!(
             !script_src.contains("'unsafe-inline'"),
             "script-src must not grant 'unsafe-inline': {v}"
+        );
+    }
+
+    #[test]
+    fn origin_of_strips_path_query_fragment_and_normalizes_scheme() {
+        // Bare origin passes through unchanged.
+        assert_eq!(origin_of("http://localhost:1100"), "http://localhost:1100");
+        // Trailing slash / path / query / fragment are dropped (CSP sources are
+        // origin-scoped; a path would silently narrow the allow-list).
+        assert_eq!(origin_of("http://localhost:1100/"), "http://localhost:1100");
+        assert_eq!(
+            origin_of("https://api.example.com/csrf/v1/generate?x=1#t"),
+            "https://api.example.com"
+        );
+        // Schemeless host:port is normalized to http, matching main.rs.
+        assert_eq!(origin_of("localhost:1100"), "http://localhost:1100");
+    }
+
+    #[test]
+    fn csp_connect_src_includes_self_and_api_origin() {
+        let v = csp_value("ABC123").to_str().unwrap().to_string();
+        // connect-src must list 'self' AND the cross-origin API origin so the
+        // WASM client's CSRF-bootstrap / server-fn fetches are not blocked.
+        let connect_src = v
+            .split("connect-src ")
+            .nth(1)
+            .and_then(|s| s.split(';').next())
+            .unwrap_or("");
+        assert!(connect_src.contains("'self'"), "connect-src must keep 'self': {v}");
+        assert!(
+            connect_src.contains("http://") || connect_src.contains("https://"),
+            "connect-src must include the API origin: {v}"
         );
     }
 }

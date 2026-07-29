@@ -36,12 +36,20 @@
 
             style-src allows the inline styles + Google Fonts the app injects;
             img-src 'self' data: https: covers avatar/media/object-storage URLs.
+            connect-src lists 'self' plus the backend API origin — the consumer
+            WASM is served from the SSR origin but fetches the axum API
+            cross-origin (CSRF bootstrap at /csrf/v1/generate, server fns, media),
+            so a bare connect-src 'self' blocks every such fetch. In SSR mode the
+            nonce layer STRIPS this meta and derives the origin from APP_API_URL
+            / SITE_URL at request time (correct in dev + prod); this static meta
+            is the authoritative policy only in client-only builds, so it carries
+            the env::APP_API_URL default (http://localhost:1100).
             frame-ancestors 'none' is ALSO emitted as a real HTTP header by the
             nonce layer (browsers ignore frame-ancestors delivered via meta).
         -->
         <meta
             http-equiv="Content-Security-Policy"
-            content="default-src 'self'; script-src 'self' 'sha256-jr/9KV8H3BuJeFDMuAzCJk3E79gtzzEmseRYuWkVirQ=' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+            content="default-src 'self'; script-src 'self' 'sha256-jr/9KV8H3BuJeFDMuAzCJk3E79gtzzEmseRYuWkVirQ=' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; media-src 'self'; connect-src 'self' http://localhost:1100; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
         />
 
     </head>

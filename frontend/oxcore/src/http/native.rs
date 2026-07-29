@@ -1,5 +1,6 @@
 use super::config::{get_base_url, get_csrf_token};
 use super::FormData;
+use once_cell::sync::Lazy;
 use reqwest::{Client, RequestBuilder as ReqwestRequestBuilder};
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -79,9 +80,21 @@ impl Response {
 // HTTP Helper Functions
 // ============================================================================
 
-thread_local! {
-    static CLIENT: Client = Client::new();
-}
+// A single shared client with an in-memory cookie jar. The cookie store is
+// load-bearing for server-side (SSR) callers: server functions run on the SSR
+// process and have no browser session, so they must hold their own backend
+// session. `/csrf/v1/generate` materializes a session by setting a `Set-Cookie`
+// header; the shared jar captures it and replays it on every subsequent
+// request, letting the per-session CSRF token validate. Sharing one client
+// (instead of a per-thread `thread_local`) is what makes that jar visible to
+// every worker thread and to the request that follows the bootstrap. `Client`
+// is itself a cheap `Arc` clone, so a single instance serves all threads.
+static CLIENT: Lazy<Client> = Lazy::new(|| {
+    Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("failed to build reqwest client")
+});
 
 fn create_headers(req: ReqwestRequestBuilder) -> ReqwestRequestBuilder {
     req.header("Content-Type", "application/json")
@@ -90,76 +103,66 @@ fn create_headers(req: ReqwestRequestBuilder) -> ReqwestRequestBuilder {
 
 pub fn get(endpoint: &str) -> Request {
     let url = format!("{}{}", get_base_url(), endpoint);
-    CLIENT.with(|client| {
-        let req = client.get(&url);
-        Request {
-            inner: create_headers(req),
-        }
-    })
+    let req = CLIENT.get(&url);
+    Request {
+        inner: create_headers(req),
+    }
 }
 
 pub fn post<T: Serialize>(endpoint: &str, body: &T) -> Request {
     let url = format!("{}{}", get_base_url(), endpoint);
-    CLIENT.with(|client| {
-        let req = client.post(&url);
-        Request {
-            inner: create_headers(req).json(body),
-        }
-    })
+    let req = CLIENT.post(&url);
+    Request {
+        inner: create_headers(req).json(body),
+    }
 }
 
 pub fn put<T: Serialize>(endpoint: &str, body: &T) -> Request {
     let url = format!("{}{}", get_base_url(), endpoint);
-    CLIENT.with(|client| {
-        let req = client.put(&url);
-        Request {
-            inner: create_headers(req).json(body),
-        }
-    })
+    let req = CLIENT.put(&url);
+    Request {
+        inner: create_headers(req).json(body),
+    }
 }
 
 pub fn delete(endpoint: &str) -> Request {
     let url = format!("{}{}", get_base_url(), endpoint);
-    CLIENT.with(|client| {
-        let req = client.delete(&url);
-        Request {
-            inner: create_headers(req),
-        }
-    })
+    let req = CLIENT.delete(&url);
+    Request {
+        inner: create_headers(req),
+    }
 }
 
 pub fn post_multipart(endpoint: &str, form_data: &FormData) -> Result<Request, String> {
     let url = format!("{}{}", get_base_url(), endpoint);
 
-    CLIENT.with(|client| {
-        let mut form = reqwest::multipart::Form::new();
+    let mut form = reqwest::multipart::Form::new();
 
-        if let Some(obj) = form_data.as_object() {
-            for (key, value) in obj {
-                match value {
-                    serde_json::Value::String(s) => {
-                        form = form.text(key.clone(), s.clone());
-                    }
-                    serde_json::Value::Number(n) => {
-                        form = form.text(key.clone(), n.to_string());
-                    }
-                    serde_json::Value::Bool(b) => {
-                        form = form.text(key.clone(), b.to_string());
-                    }
-                    serde_json::Value::Null => {
-                        form = form.text(key.clone(), "");
-                    }
-                    _ => {
-                        return Err(format!("Unsupported value type for key '{}'", key));
-                    }
+    if let Some(obj) = form_data.as_object() {
+        for (key, value) in obj {
+            match value {
+                serde_json::Value::String(s) => {
+                    form = form.text(key.clone(), s.clone());
+                }
+                serde_json::Value::Number(n) => {
+                    form = form.text(key.clone(), n.to_string());
+                }
+                serde_json::Value::Bool(b) => {
+                    form = form.text(key.clone(), b.to_string());
+                }
+                serde_json::Value::Null => {
+                    form = form.text(key.clone(), "");
+                }
+                _ => {
+                    return Err(format!("Unsupported value type for key '{}'", key));
                 }
             }
         }
+    }
 
-        let req = client.post(&url);
-        Ok(Request {
-            inner: req.header("csrf-token", get_csrf_token()).multipart(form),
-        })
+    let req = CLIENT.post(&url);
+    Ok(Request {
+        inner: req.header("csrf-token", get_csrf_token()).multipart(form),
     })
 }
 

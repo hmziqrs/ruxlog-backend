@@ -192,7 +192,7 @@ pub async fn create(
 
     let new_post = payload.0.into_new_post(user.id);
 
-    match post::Entity::create(&state.sea_db, &state.object_storage.public_url, new_post).await {
+    match post::Entity::create(&state.sea_db, &state.storage.config.public_url, new_post).await {
         Ok(post) => {
             info!(post_id = post.id, slug = %post.slug, "Post created successfully");
             tracing::Span::current().record("post_id", post.id);
@@ -222,7 +222,7 @@ pub async fn find_by_id_or_slug(
             info!(post_id = id, "Searching by ID");
             post::Entity::find_by_id_or_slug(
                 &state.sea_db,
-                &state.object_storage.public_url,
+                &state.storage.config.public_url,
                 Some(id),
                 None,
             )
@@ -232,7 +232,7 @@ pub async fn find_by_id_or_slug(
             info!(slug = %slug_or_id, "Searching by slug");
             post::Entity::find_by_id_or_slug(
                 &state.sea_db,
-                &state.object_storage.public_url,
+                &state.storage.config.public_url,
                 None,
                 Some(slug_or_id),
             )
@@ -297,7 +297,7 @@ pub async fn update(
 
     match post::Entity::update(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         post_id,
         update_post,
     )
@@ -356,12 +356,14 @@ pub async fn find_published_posts(
     let page = payload.page.unwrap_or(1);
     match post::Entity::find_published_paginated(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         payload.0.into_post_query(),
     )
     .await
     {
-        Ok((mut posts, total)) => {
+        Ok(result) => {
+            let mut posts = result.data;
+            let total = result.total;
             // Strip gated content the viewer isn't entitled to (lists never need
             // full bodies of paid posts anyway).
             apply_paywall_list(&state, &mut posts, auth.user.as_ref()).await?;
@@ -400,10 +402,8 @@ pub async fn track_view(
         .get(axum::http::header::USER_AGENT)
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-    if !crate::services::abuse_limiter::dedup_nx(&state.redis_pool, &dedup_key, 300)
-        .await
-        .unwrap_or(true)
-    {
+    if !rux_request_gate::dedup_nx(&state.redis_pool, &dedup_key, 300).await {
+
         // Already counted this (post, ip) within the window — short-circuit so
         // we don't INSERT another post_view row or bump the counter again.
         return Ok((
@@ -471,12 +471,14 @@ pub async fn query(
 
     match post::Entity::search(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         query_params.into_post_query(),
     )
     .await
     {
-        Ok((mut posts, total)) => {
+        Ok(result) => {
+            let mut posts = result.data;
+            let total = result.total;
             // Enforce the server-side paywall on the search results too (audit
             // V-MED-1): without this, moderators/admins/super-admins receive the
             // full `content` of Paid / SubscriberOnly posts. Mirrors the
@@ -537,7 +539,7 @@ pub async fn autosave(
 
             match post::Entity::update(
                 &state.sea_db,
-                &state.object_storage.public_url,
+                &state.storage.config.public_url,
                 p.post_id,
                 update,
             )
@@ -568,9 +570,9 @@ pub async fn revisions_list(
     let page: u64 = 1;
 
     match post_revision::Entity::list_by_post(&state.sea_db, post_id, Some(page), None).await {
-        Ok((items, total)) => Ok((
+        Ok(result) => Ok((
             StatusCode::OK,
-            Json(json!({ "data": items, "total": total, "page": page })),
+            Json(json!({ "data": result.data, "total": result.total, "page": page })),
         )),
         Err(err) => Err(err),
     }
@@ -631,7 +633,7 @@ pub async fn revisions_restore(
 
     match post::Entity::update(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         post_id,
         update,
     )
@@ -773,7 +775,9 @@ pub async fn series_list(
 
     match post_series::Entity::list(&state.sea_db, payload.page, None, payload.search.clone()).await
     {
-        Ok((items, total)) => {
+        Ok(result) => {
+            let total = result.total;
+            let items = result.data;
             let mut data = Vec::with_capacity(items.len());
             for s in items {
                 let count = post_series_post::Entity::count_by_series(&state.sea_db, s.id)

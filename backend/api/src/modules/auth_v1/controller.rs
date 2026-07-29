@@ -823,11 +823,11 @@ pub async fn sessions_list(
     let page = 1;
 
     match user_session::Entity::list_by_user(&state.sea_db, user.id, Some(page)).await {
-        Ok((sessions, total)) => Ok((
+        Ok(result) => Ok((
             StatusCode::OK,
             Json(json!({
-                "data": sessions,
-                "total": total,
+                "data": result.data,
+                "total": result.total,
                 "page": page,
             })),
         )),
@@ -895,10 +895,12 @@ pub async fn sessions_terminate(
     }
 }
 
-/// Redis key holding the tower-session id for a given `user_sessions.id`.
-fn session_mapping_key(pg_session_id: i32) -> String {
-    format!("rux:sid_map:{pg_session_id}")
-}
+// Session-mapping helpers (session_mapping_key / record_session_mapping /
+// lookup_session_mapping) now live in the service layer (crate::services::auth)
+// so the OAuth login path can call them without an inverted service→module
+// import. Re-exported pub(crate) here so this module's callers and the
+// cross-module oauth callers (passkey/google) keep their existing paths.
+pub(crate) use crate::services::auth::{lookup_session_mapping, record_session_mapping};
 
 /// F#16 (CSRF re-rotation at trust transitions): rotate the session id after a
 /// privilege/trust change so the per-session CSRF token rebinds. The frontend
@@ -1007,59 +1009,13 @@ mod login_totp_token {
     }
 }
 
-/// Persist `user_sessions.id -> tower_session_id` so terminate can later find
-/// and kill the live tower-sessions record. TTLs with the session max-age.
-/// `pub(crate)` so the Google-OAuth login path records the same mapping.
-pub(crate) async fn record_session_mapping(
-    redis_pool: &tower_sessions_redis_store::fred::prelude::Pool,
-    pg_session_id: i32,
-    tower_session_id: &str,
-) {
-    use tower_sessions_redis_store::fred::interfaces::KeysInterface;
-
-    let key = session_mapping_key(pg_session_id);
-    let set_result: Result<(), _> = redis_pool
-        .set::<(), _, _>(
-            key,
-            tower_session_id.to_string(),
-            Some(fred::types::Expiration::EX(
-                crate::services::auth::SESSION_MAX_AGE_SECS,
-            )),
-            None,
-            false,
-        )
-        .await;
-    if let Err(e) = set_result {
-        warn!(error = %e, "Failed to record tower-session mapping");
-    }
-}
-
-/// Look up the tower-session id previously recorded for a `user_sessions.id`.
-/// Returns `None` if the mapping is absent (pre-fix rows, or expired).
-async fn lookup_session_mapping(
-    redis_pool: &tower_sessions_redis_store::fred::prelude::Pool,
-    pg_session_id: i32,
-) -> Option<String> {
-    use tower_sessions_redis_store::fred::interfaces::KeysInterface;
-
-    let key = session_mapping_key(pg_session_id);
-    match redis_pool.get::<Option<String>, _>(key).await {
-        Ok(Some(sid)) => Some(sid),
-        Ok(None) => None,
-        Err(e) => {
-            warn!(
-                error = %e,
-                session_id = pg_session_id,
-                "Failed to look up tower-session mapping; live record cannot be DEL'd (revoked_at is audit-only)"
-            );
-            None
-        }
-    }
-}
+// record_session_mapping / lookup_session_mapping moved to crate::services::auth
+// (re-exported above) so services::oauth can use them without a module import.
 
 #[cfg(test)]
 mod tests {
-    use super::{login_totp_token, session_mapping_key};
+    use super::login_totp_token;
+    use crate::services::auth::session_mapping_key;
 
     /// V-HIGH-2: the PG-row → tower-session-id mapping key must be a stable,
     /// namespaced function of the integer `user_sessions.id` so terminate can

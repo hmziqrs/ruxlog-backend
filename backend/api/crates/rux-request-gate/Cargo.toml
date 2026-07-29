@@ -1,0 +1,33 @@
+[package]
+name = "rux-request-gate"
+version = "0.1.0"
+edition = "2021"
+description = "Redis-backed fixed-window rate limiting, dual-threshold abuse limiting, and one-shot dedup for Axum"
+publish = false
+
+[features]
+default = ["axum-client-ip"]
+# Enables `ClientIpSource`, which reads the `axum_client_ip::ClientIp` request
+# extension. Disable to supply a custom `IpSource` (e.g. when not using
+# axum-client-ip upstream).
+axum-client-ip = ["dep:axum-client-ip"]
+
+[dependencies]
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-layer = "0.3"
+tower-service = "0.3"
+# Access fred's types via this re-export, but declare fred directly too so its
+# `i-scripts`/`sha-1` features (LuaInterface / EVAL-SHA) are enabled. Same
+# version → unifies with the re-exported fred; no version skew.
+tower-sessions-redis-store = "0.16.0"
+fred = { version = "10.1.0", features = ["sha-1", "i-scripts"] }
+async-trait = "0.1"
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+http = "1.0"
+axum-client-ip = { version = "1.0", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -3,6 +3,7 @@ use crate::{
     error::{DbResult, ErrorCode, ErrorResponse},
 };
 use chrono::Utc;
+use ruxlog_types::PaginatedList;
 use sea_orm::{
     entity::prelude::*, IntoActiveModel, JoinType, Order, QueryOrder, QuerySelect, Set,
     TransactionTrait,
@@ -124,7 +125,7 @@ impl Entity {
     pub async fn admin_query(
         conn: &DbConn,
         query: &AdminForgotPasswordQuery,
-    ) -> DbResult<(Vec<Model>, u64)> {
+    ) -> DbResult<PaginatedList<Model>> {
         let mut db_query = Self::find();
 
         if let Some(user_id) = query.user_id {
@@ -173,7 +174,7 @@ impl Entity {
 
         match paginator.num_items().await {
             Ok(total) => match paginator.fetch_page(page - 1).await {
-                Ok(results) => Ok((results, total)),
+                Ok(results) => Ok(PaginatedList::new(results, total, page, ADMIN_PER_PAGE)),
                 Err(err) => Err(err.into()),
             },
             Err(err) => Err(err.into()),

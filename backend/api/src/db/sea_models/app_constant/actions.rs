@@ -1,4 +1,5 @@
 use super::*;
+use ruxlog_types::PaginatedList;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
@@ -92,7 +93,7 @@ impl Entity {
         search: Option<String>,
         is_sensitive: Option<bool>,
         value_type: Option<String>,
-    ) -> Result<(Vec<Model>, u64), DbErr> {
+    ) -> Result<PaginatedList<Model>, DbErr> {
         let mut query = Entity::find();
 
         if let Some(search) = search {
@@ -118,7 +119,7 @@ impl Entity {
             .limit(per_page)
             .all(db)
             .await?;
-        Ok((items, total))
+        Ok(PaginatedList::new(items, total, page, per_page))
     }
 
     pub async fn sync_all_to_redis(

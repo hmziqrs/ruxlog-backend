@@ -42,20 +42,12 @@ pub struct PaymentRecord {
 /// `x-signature`+`x-request-id`. The previous single-`signature` shape forced
 /// the controller to guess one header per provider and dropped the rest, so
 /// providers that needed a timestamp header could never verify. See plan 1a.
-#[derive(Debug, Clone)]
-pub struct WebhookEvent {
-    /// Provider that sent this event
-    pub provider: String,
-    /// Raw payload bytes (exactly as received — never re-encoded JSON)
-    pub payload: Vec<u8>,
-    /// All request headers; each provider reads the ones it needs.
-    pub headers: axum::http::HeaderMap,
-    /// The raw URL query string of the incoming webhook request.
-    /// Mercado Pago's signature scheme signs over `data.id` taken from the
-    /// webhook URL's query string (not the body), so the receiver must forward
-    /// it. `None` for providers/tests that don't use it. (V-CRIT-2)
-    pub query: Option<String>,
-}
+///
+/// This shape is shared with the mail stack, so it lives in `rux-provider-core`
+/// and is re-exported here so every existing
+/// `use super::provider::WebhookEvent` / `crate::services::billing::provider::WebhookEvent`
+/// import keeps resolving unchanged.
+pub use rux_provider_core::WebhookEvent;
 
 /// Canonical webhook event vocabulary.
 ///
@@ -263,6 +255,14 @@ pub trait BillingProvider: Send + Sync {
     ) -> Result<String, BillingError>;
 }
 
+/// Every [`BillingProvider`] object is a [`rux_provider_core::Provider`]. This
+/// opts the dyn-trait into the framework marker so `ProviderRegistry<dyn
+/// BillingProvider>` (used by [`crate::services::billing::router::BillingRouter`])
+/// satisfies its `P: Provider` bound. The marker carries no methods, so the 15
+/// existing `impl BillingProvider for ...` blocks compile unchanged and
+/// `obj.provider_name()` on a `dyn BillingProvider` stays unambiguous.
+impl rux_provider_core::Provider for dyn BillingProvider {}
+
 /// Errors from billing operations.
 #[derive(Debug, thiserror::Error)]
 pub enum BillingError {
@@ -286,6 +286,30 @@ pub enum BillingError {
 
     #[error("{0}")]
     Other(String),
+}
+
+/// Narrow the shared [`rux_provider_core::FrameworkError`] (returned by
+/// `ProviderRegistry` lookups) into [`BillingError`], preserving billing's
+/// exact error variant + message conventions. The generic lookup path
+/// (`get_provider`, used by checkout/cancel/get_subscription/portal) maps a
+/// missing provider to `BillingError::Config("Provider '{name}' not initialized")`.
+///
+/// Note: `verify_webhook` deliberately uses a DIFFERENT mapping —
+/// `BillingError::WebhookVerification("Unknown provider '{name}' for webhook")`
+/// — applied explicitly at its call site rather than via this `From` impl, so
+/// the HTTP semantics of an unknown webhook provider stay distinct (drift
+/// point #1 vs mail).
+impl From<rux_provider_core::FrameworkError> for BillingError {
+    fn from(err: rux_provider_core::FrameworkError) -> Self {
+        match err {
+            rux_provider_core::FrameworkError::ProviderNotRegistered(name) => {
+                BillingError::Config(format!("Provider '{}' not initialized", name))
+            }
+            rux_provider_core::FrameworkError::Config(msg) => BillingError::Config(msg),
+            rux_provider_core::FrameworkError::ProviderApi(msg) => BillingError::ProviderApi(msg),
+            rux_provider_core::FrameworkError::Other(msg) => BillingError::Other(msg),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use sea_orm::{ActiveModelTrait, ConnectionTrait, Set};
 
 use super::model::{ActiveModel, Column, Entity, EntityType, Model};
 use crate::error::DbResult;
+use ruxlog_types::PaginatedList;
 use sea_orm::{PaginatorTrait, QueryOrder};
 
 impl Entity {
@@ -124,7 +125,7 @@ impl Entity {
         entity_id: Option<i32>,
         field_name: Option<String>,
         page: Option<u64>,
-    ) -> DbResult<(Vec<Model>, u64)> {
+    ) -> DbResult<PaginatedList<Model>> {
         let mut query = Self::find();
 
         if let Some(mid) = media_id {
@@ -157,7 +158,7 @@ impl Entity {
 
         match paginator.num_items().await {
             Ok(total) => match paginator.fetch_page(page - 1).await {
-                Ok(results) => Ok((results, total)),
+                Ok(results) => Ok(PaginatedList::new(results, total, page, Self::PER_PAGE)),
                 Err(err) => Err(err.into()),
             },
             Err(err) => Err(err.into()),

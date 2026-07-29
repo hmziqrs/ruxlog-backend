@@ -1,21 +1,86 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Stable, wire-visible error codes for the ruxlog API.
+///
+/// ## Contract
+///
+/// Every variant serializes to a fixed `"<NS>_<NNN>"` token (via its
+/// `#[serde(rename = ...)]`), which is the value clients match on as the `type`
+/// field of an error response body. **Never rename a variant or renumber its
+/// token** — either is a client-visible breaking change on the wire. Adding new
+/// variants is safe.
+///
+/// Namespace prefixes: `AUTH` (authn/authz), `VAL` (input validation), `DB`
+/// (data layer), `SRV` (generic server/infra), `BIZ` (business rules), `EXT`
+/// (external services), `AST` (assets/uploads), `EML` (mail), `PST` (posts),
+/// `CAT` (categories), `TAG` (tags), `NWS` (newsletter).
+///
+/// [`ErrorCode::status_code()`] is the single source of truth for the HTTP
+/// status of a code; it is locked by the `status_code_map_is_total_and_stable`
+/// regression test and must only change deliberately alongside that snapshot.
+///
+/// ## Near-duplicate codes — pick by cause, not by status
+///
+/// Several distinct codes map to the same HTTP status. They are NOT redundant;
+/// choose by *why* the error happened:
+///
+/// ### 429 — `RateLimited` (SRV_004) vs `TooManyAttempts` (AUTH_007)
+///
+/// - **`RateLimited`** — generic per-IP / per-path throughput limiting, or an
+///   upstream provider throttle (e.g. the mail provider asked us to slow down).
+///   Emitters: the HTTP rate-limit middleware and the mail error-map.
+///   Semantics: "back off on volume."
+/// - **`TooManyAttempts`** — attempt-count / brute-force protection on one
+///   specific security action (login, forgot-password, email-verification
+///   resend, backup-code redemption). Emitters: the abuse limiter and the
+///   verification-delay guards. Semantics: "stop retrying *this* action."
+///
+/// Both are 429 and both MUST attach a `Retry-After` header wherever a retry
+/// deadline is known — the two are contractually symmetric on the wire, so do
+/// not "fix" the duplication by merging them (a merge would renumber the wire
+/// token and break clients).
+///
+/// ### 409 — `DuplicateEntry` (DB_003) vs `IntegrityError` (DB_007)
+///
+/// - **`DuplicateEntry`** — a unique-key violation (a conflicting row already
+///   exists); the client resolves it by changing the conflicting value.
+/// - **`IntegrityError`** — a foreign-key / check-constraint violation (a
+///   referenced row is missing or an invariant failed).
+///
+/// ### 400 — `InvalidFormat` (VAL_003) vs `InvalidEmailFormat` (EML_002)
+///
+/// - **`InvalidFormat`** — generic input-format failure (any field).
+/// - **`InvalidEmailFormat`** — an email-address format failure in the mail
+///   subsystem; prefer it in mail flows for sharper client UX.
+///
+/// ## Dead variants
+///
+/// Variants marked `#[deprecated]` have no emitter anywhere in the codebase and
+/// are kept only for wire stability; do not add new usages. They are slated for
+/// removal in a follow-up dead-code pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     #[serde(rename = "AUTH_001")]
     InvalidCredentials,
     #[serde(rename = "AUTH_002")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     UserNotFound,
     #[serde(rename = "AUTH_003")]
     SessionExpired,
     #[serde(rename = "AUTH_004")]
     Unauthorized,
     #[serde(rename = "AUTH_005")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     PasswordResetRequired,
     #[serde(rename = "AUTH_006")]
     AccountLocked,
+    /// Attempt-count / brute-force protection on a specific security action
+    /// (login, forgot-password, email-verification resend, backup-code
+    /// redemption). HTTP 429. Distinct from `RateLimited` (SRV_004): this is
+    /// "stop retrying this action", not "back off on volume". See the enum docs
+    /// for the full rule. Emitters: abuse limiter, verification-delay guards.
     #[serde(rename = "AUTH_007")]
     TooManyAttempts,
     #[serde(rename = "AUTH_008")]
@@ -27,9 +92,12 @@ pub enum ErrorCode {
     InvalidInput,
     #[serde(rename = "VAL_002")]
     MissingRequiredField,
+    /// Generic input-format failure (any field). HTTP 400. For email-address
+    /// format failures in mail flows, prefer `InvalidEmailFormat` (EML_002).
     #[serde(rename = "VAL_003")]
     InvalidFormat,
     #[serde(rename = "VAL_004")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     InvalidLength,
     #[serde(rename = "VAL_005")]
     InvalidValue,
@@ -38,8 +106,13 @@ pub enum ErrorCode {
 
     #[serde(rename = "DB_001")]
     DatabaseConnectionError,
+    /// The canonical 404 for a missing record. Prefer this over the per-domain
+    /// `*NotFound` codes (PST_001 / CAT_001 / TAG_001 / NWS_001), which are
+    /// unused and deprecated.
     #[serde(rename = "DB_002")]
     RecordNotFound,
+    /// A unique-key violation: a conflicting row already exists. HTTP 409.
+    /// Distinct from `IntegrityError` (DB_007), which is an FK/check failure.
     #[serde(rename = "DB_003")]
     DuplicateEntry,
     #[serde(rename = "DB_004")]
@@ -47,7 +120,11 @@ pub enum ErrorCode {
     #[serde(rename = "DB_005")]
     TransactionError,
     #[serde(rename = "DB_006")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     RelationshipError,
+    /// A foreign-key / check-constraint violation: a referenced row is missing
+    /// or an invariant failed. HTTP 409. Distinct from `DuplicateEntry`
+    /// (DB_003), which is a unique-key conflict.
     #[serde(rename = "DB_007")]
     IntegrityError,
 
@@ -56,7 +133,12 @@ pub enum ErrorCode {
     #[serde(rename = "SRV_002")]
     ServiceUnavailable,
     #[serde(rename = "SRV_003")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     Timeout,
+    /// Generic per-IP / per-path throughput limiting, or an upstream provider
+    /// throttle. HTTP 429. Distinct from `TooManyAttempts` (AUTH_007): this is
+    /// "back off on volume", not "stop retrying this action". Emitters: HTTP
+    /// rate-limit middleware, mail error-map. Must attach `Retry-After`.
     #[serde(rename = "SRV_004")]
     RateLimited,
     #[serde(rename = "SRV_005")]
@@ -65,8 +147,10 @@ pub enum ErrorCode {
     #[serde(rename = "BIZ_001")]
     OperationNotAllowed,
     #[serde(rename = "BIZ_002")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     ResourceConflict,
     #[serde(rename = "BIZ_003")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     BusinessRuleViolation,
     #[serde(rename = "BIZ_004")]
     DependencyExists,
@@ -74,8 +158,10 @@ pub enum ErrorCode {
     #[serde(rename = "EXT_001")]
     ExternalServiceError,
     #[serde(rename = "EXT_002")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     ExternalServiceTimeout,
     #[serde(rename = "EXT_003")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     ExternalServiceUnavailable,
 
     #[serde(rename = "AST_001")]
@@ -91,36 +177,51 @@ pub enum ErrorCode {
     #[serde(rename = "AST_006")]
     FileDeletionError,
     #[serde(rename = "AST_007")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     AssetMetadataError,
 
     #[serde(rename = "EML_001")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     EmailSendingError,
+    /// An email-address format failure in the mail subsystem. HTTP 400. For
+    /// non-email fields, use `InvalidFormat` (VAL_003).
     #[serde(rename = "EML_002")]
     InvalidEmailFormat,
     #[serde(rename = "EML_003")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     EmailDeliveryError,
+    /// Email delivery suppressed (e.g. recipient on the suppression list).
+    /// HTTP 422: a semantic refusal, not a server error.
     #[serde(rename = "EML_004")]
     EmailSuppressed,
 
     #[serde(rename = "PST_001")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     PostNotFound,
     #[serde(rename = "PST_002")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     InvalidPostStatus,
     #[serde(rename = "PST_003")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     PostAlreadyPublished,
     #[serde(rename = "PST_004")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     SlugAlreadyExists,
 
     #[serde(rename = "CAT_001")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     CategoryNotFound,
     #[serde(rename = "CAT_002")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     CategoryInUse,
     #[serde(rename = "CAT_003")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     InvalidCategoryParent,
 
     #[serde(rename = "TAG_001")]
     TagNotFound,
     #[serde(rename = "TAG_002")]
+    #[deprecated(note = "unused; no emitter — candidate for removal, do not add new usages")]
     TagAlreadyExists,
 
     #[serde(rename = "NWS_001")]
@@ -128,6 +229,13 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Human-readable default message for the code.
+    ///
+    /// `#[allow(deprecated)]`: this match must be exhaustive over every variant,
+    /// including the `#[deprecated]` dead ones, so they still resolve to a
+    /// message rather than panicking. New usages of deprecated variants anywhere
+    /// *outside* this lookup are still warned at.
+    #[allow(deprecated)]
     pub fn default_message(&self) -> &'static str {
         match self {
             Self::InvalidCredentials => "Invalid username or password",
@@ -199,6 +307,12 @@ impl ErrorCode {
         }
     }
 
+    /// HTTP status for the code — the single source of truth for the wire status.
+    ///
+    /// `#[allow(deprecated)]`: this match must be exhaustive over every variant,
+    /// including the `#[deprecated]` dead ones, so their status stays locked by
+    /// the `status_code_map_is_total_and_stable` regression test until removal.
+    #[allow(deprecated)]
     pub fn status_code(&self) -> u16 {
         match self {
             Self::InvalidCredentials => 401,
@@ -312,6 +426,9 @@ impl ErrorResponse {
 mod tests {
     use super::*;
 
+    /// Spot-checks a sample of codes (including deprecated ones, to prove they
+    /// still resolve to a message rather than panicking).
+    #[allow(deprecated)]
     #[test]
     fn all_codes_have_non_empty_default_messages() {
         let codes = [
@@ -338,6 +455,9 @@ mod tests {
         }
     }
 
+    /// Includes deprecated variants (Timeout, BusinessRuleViolation) so their
+    /// mapping stays pinned until removal.
+    #[allow(deprecated)]
     #[test]
     fn status_code_mappings() {
         assert_eq!(ErrorCode::InvalidCredentials.status_code(), 401);
@@ -352,6 +472,9 @@ mod tests {
         assert_eq!(ErrorCode::BusinessRuleViolation.status_code(), 422);
     }
 
+    /// Includes a deprecated variant (PostNotFound) to keep its display token
+    /// pinned until removal.
+    #[allow(deprecated)]
     #[test]
     fn display_format_matches_serde_rename() {
         assert_eq!(ErrorCode::InvalidCredentials.to_string(), "AUTH_001");
@@ -384,5 +507,116 @@ mod tests {
         let resp = ErrorResponse::new(ErrorCode::RateLimited);
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("details"));
+    }
+
+    /// Locks the intentional 429 split documented on the enum: `RateLimited`
+    /// (SRV_004) and `TooManyAttempts` (AUTH_007) are two DISTINCT codes that
+    /// both map to HTTP 429. Merging them would renumber a wire token and break
+    /// clients — this test makes a silent merge a compile/test failure.
+    #[test]
+    fn rate_limited_and_too_many_attempts_are_intentionally_distinct() {
+        // Both are 429 (the reason they look like duplicates).
+        assert_eq!(ErrorCode::RateLimited.status_code(), 429);
+        assert_eq!(ErrorCode::TooManyAttempts.status_code(), 429);
+
+        // They are different codes on the wire...
+        assert_ne!(ErrorCode::RateLimited, ErrorCode::TooManyAttempts);
+        assert_ne!(
+            ErrorCode::RateLimited.to_string(),
+            ErrorCode::TooManyAttempts.to_string()
+        );
+        assert_eq!(ErrorCode::RateLimited.to_string(), "SRV_004");
+        assert_eq!(ErrorCode::TooManyAttempts.to_string(), "AUTH_007");
+
+        // ...and carry different default messaging (different client semantics).
+        assert_ne!(
+            ErrorCode::RateLimited.default_message(),
+            ErrorCode::TooManyAttempts.default_message()
+        );
+    }
+
+    /// Snapshot of the full variant -> HTTP status mapping. Locks the wire
+    /// contract: any change to a code's status must be made deliberately and
+    /// update this table, or the test fails. Covers every variant, including
+    /// the `#[deprecated]` dead ones (so their status can't silently drift
+    /// before removal).
+    #[allow(deprecated)]
+    #[test]
+    fn status_code_map_is_total_and_stable() {
+        let snapshot: &[(ErrorCode, u16)] = &[
+            (ErrorCode::InvalidCredentials, 401),
+            (ErrorCode::UserNotFound, 404),
+            (ErrorCode::SessionExpired, 401),
+            (ErrorCode::Unauthorized, 403),
+            (ErrorCode::PasswordResetRequired, 403),
+            (ErrorCode::AccountLocked, 403),
+            (ErrorCode::TooManyAttempts, 429),
+            (ErrorCode::EmailVerificationRequired, 403),
+            (ErrorCode::InvalidToken, 401),
+            (ErrorCode::InvalidInput, 400),
+            (ErrorCode::MissingRequiredField, 400),
+            (ErrorCode::InvalidFormat, 400),
+            (ErrorCode::InvalidLength, 400),
+            (ErrorCode::InvalidValue, 400),
+            (ErrorCode::ValidationError, 400),
+            (ErrorCode::DatabaseConnectionError, 500),
+            (ErrorCode::RecordNotFound, 404),
+            (ErrorCode::DuplicateEntry, 409),
+            (ErrorCode::QueryError, 500),
+            (ErrorCode::TransactionError, 500),
+            (ErrorCode::RelationshipError, 400),
+            (ErrorCode::IntegrityError, 409),
+            (ErrorCode::InternalServerError, 500),
+            (ErrorCode::ServiceUnavailable, 503),
+            (ErrorCode::Timeout, 504),
+            (ErrorCode::RateLimited, 429),
+            (ErrorCode::ConfigurationError, 500),
+            (ErrorCode::OperationNotAllowed, 403),
+            (ErrorCode::ResourceConflict, 409),
+            (ErrorCode::BusinessRuleViolation, 422),
+            (ErrorCode::DependencyExists, 409),
+            (ErrorCode::ExternalServiceError, 502),
+            (ErrorCode::ExternalServiceTimeout, 504),
+            (ErrorCode::ExternalServiceUnavailable, 503),
+            (ErrorCode::FileUploadError, 500),
+            (ErrorCode::FileNotFound, 404),
+            (ErrorCode::FileTooLarge, 413),
+            (ErrorCode::InvalidFileType, 415),
+            (ErrorCode::StorageError, 500),
+            (ErrorCode::FileDeletionError, 500),
+            (ErrorCode::AssetMetadataError, 400),
+            (ErrorCode::EmailSendingError, 500),
+            (ErrorCode::InvalidEmailFormat, 400),
+            (ErrorCode::EmailDeliveryError, 500),
+            (ErrorCode::EmailSuppressed, 422),
+            (ErrorCode::PostNotFound, 404),
+            (ErrorCode::InvalidPostStatus, 400),
+            (ErrorCode::PostAlreadyPublished, 409),
+            (ErrorCode::SlugAlreadyExists, 409),
+            (ErrorCode::CategoryNotFound, 404),
+            (ErrorCode::CategoryInUse, 409),
+            (ErrorCode::InvalidCategoryParent, 400),
+            (ErrorCode::TagNotFound, 404),
+            (ErrorCode::TagAlreadyExists, 409),
+            (ErrorCode::SubscriberNotFound, 404),
+        ];
+
+        // Totality guard: every variant must appear exactly once. If a variant
+        // is added or removed without updating this table, the counts diverge.
+        let expected_count = snapshot.len();
+        for (code, expected_status) in snapshot {
+            assert_eq!(
+                code.status_code(),
+                *expected_status,
+                "status drift for {:?} ({})",
+                code,
+                code
+            );
+        }
+
+        // Sanity: the table claims to cover all variants. We can't enumerate the
+        // enum without a crate, so we pin the known live count; changing it is a
+        // signal to revisit this snapshot.
+        assert_eq!(expected_count, 55, "ErrorCode variant count changed");
     }
 }

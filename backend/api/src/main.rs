@@ -1,9 +1,8 @@
 #[cfg(feature = "admin-acl")]
 use axum::extract::State;
 use axum::{http::HeaderName, middleware, Extension};
-use axum_client_ip::ClientIpSource;
 use axum_extra::extract::cookie::SameSite;
-use std::{env, net::SocketAddr, time::Duration};
+use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tower_http::{
     compression::CompressionLayer,
     cors::{AllowOrigin, CorsLayer},
@@ -11,11 +10,21 @@ use tower_http::{
 use tower_sessions::{cookie::Key, Expiry, SessionManagerLayer};
 use tower_sessions_redis_store::RedisStore;
 
+// `env_bool`/`parse_env_u64` are used by the always-on mail-router builder;
+// `env_u64`/`env_with_fallback` are only reached under their respective features
+// (admin-routes route-blocker sync, image-moderation URL/key), so they are
+// cfg-gated here to avoid unused-import warnings in slim feature builds.
+use ruxlog::config::env::{env_bool, parse_env_u64};
+#[cfg(feature = "admin-routes")]
+use ruxlog::config::env::env_u64;
+#[cfg(feature = "image-moderation")]
+use ruxlog::config::env::env_with_fallback;
 use ruxlog::utils::cors::get_allowed_origins;
 use ruxlog::{
+    config::Settings,
     db, middlewares, router,
     services::redis::init_redis_store,
-    state::{validate_cookie_key, AppState, ObjectStorageConfig},
+    state::{AppState, StorageState},
     utils::telemetry,
 };
 
@@ -25,64 +34,11 @@ use ruxlog::services::acl_service::AclService;
 #[cfg(feature = "admin-routes")]
 use ruxlog::services::{route_blocker_config, route_blocker_service::RouteBlockerService};
 
-#[cfg(feature = "image-optimization")]
-use ruxlog::state::OptimizerConfig;
-
 #[cfg(feature = "billing")]
 use ruxlog::services::billing::BillingProvider;
 
 #[cfg(feature = "billing")]
 use ruxlog::services::billing::router::{BillingRouter, GeoRouter, GeoRulesConfig};
-
-fn env_bool(key: &str, default: bool) -> bool {
-    env::var(key)
-        .ok()
-        .and_then(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            match normalized.as_str() {
-                "1" | "true" | "yes" | "on" => Some(true),
-                "0" | "false" | "no" | "off" => Some(false),
-                _ => None,
-            }
-        })
-        .unwrap_or(default)
-}
-
-#[cfg_attr(not(feature = "full"), allow(dead_code))]
-fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(default)
-}
-
-#[cfg_attr(not(feature = "full"), allow(dead_code))]
-fn env_u8(key: &str, default: u8) -> u8 {
-    let candidate = env::var(key)
-        .ok()
-        .and_then(|value| value.trim().parse::<u8>().ok())
-        .unwrap_or(default);
-    candidate.clamp(0, 100)
-}
-
-fn env_with_fallback(keys: &[&str], default: Option<&str>) -> Option<String> {
-    for key in keys {
-        if let Ok(value) = env::var(key) {
-            if !value.trim().is_empty() {
-                return Some(value);
-            }
-        }
-    }
-
-    default.map(|value| value.to_string())
-}
-
-fn parse_env_u64(name: &str, default: u64) -> u64 {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(default)
-}
 
 /// Build the [`MailRouter`] from `MAIL_PROVIDER` + provider-specific env. The
 /// selected provider's required env is read with `expect` (fail-loud boot) so a
@@ -190,53 +146,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     telemetry::init_pool_metrics();
 
-    let cookie_key_str = env::var("COOKIE_KEY").expect("COOKIE_KEY must be set");
-    // V-CRIT-1: refuse the known committed placeholder, empty/whitespace, and
-    // sub-32-byte keys BEFORE Key::derive_from. The previous length-only guard
-    // passed for the placeholder because it is >32 bytes, so production could
-    // boot on a publicly-known key. Panicking here is intentional — booting on
-    // a weak/known cookie key is worse than failing to boot. See
-    // CRYPTO_AUDIT.md V-CRIT-1 / V-HIGH-3.
-    if let Err(reason) = validate_cookie_key(&cookie_key_str) {
-        panic!("{}", reason);
-    }
+    // Typed, fail-closed boot configuration: validates COOKIE_KEY (refuses the
+    // known committed placeholder / empty / sub-32-byte keys before any
+    // derivation — CRYPTO_AUDIT.md V-CRIT-1 / V-HIGH-3), reads the mandatory S3
+    // fields, and parses the HTTP/site/optimizer settings. A misconfigured
+    // deployment panics here with the same operator-actionable messages the old
+    // inline `expect` / `validate_cookie_key` calls produced.
+    let settings = Arc::new(Settings::from_env());
+
+    // CRYP-KM-003 / V-MED-11: install the field-encryption key into the
+    // process-wide `utils::field_crypto` OnceLock so the SeaORM model layer can
+    // encrypt/decrypt payout metadata without callers passing the key. The key
+    // no longer lives on `AppState` (no consumer ever read it there — the model
+    // layer reaches it via the process-global slot), but this side-effecting
+    // install MUST still run at boot.
+    ruxlog::state::load_field_enc_key();
 
     let sea_db = db::sea_connect::get_sea_connection().await;
 
     let (redis_pool, redis_connection) = init_redis_store().await?;
 
-    let bucket = env_with_fallback(&["S3_BUCKET", "AWS_S3_BUCKET"], None)
-        .expect("S3_BUCKET or AWS_S3_BUCKET must be set");
-    let access_key = env_with_fallback(&["S3_ACCESS_KEY", "AWS_ACCESS_KEY_ID"], None)
-        .expect("S3_ACCESS_KEY or AWS_ACCESS_KEY_ID must be set");
-    let secret_key = env_with_fallback(&["S3_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"], None)
-        .expect("S3_SECRET_KEY or AWS_SECRET_ACCESS_KEY must be set");
-    let endpoint = env_with_fallback(&["S3_ENDPOINT", "AWS_ENDPOINT", "GARAGE_S3_ENDPOINT"], None)
-        .expect("S3_ENDPOINT, AWS_ENDPOINT, or GARAGE_S3_ENDPOINT must be set");
-    let public_url = env_with_fallback(&["S3_PUBLIC_URL", "AWS_S3_PUBLIC_URL"], None)
-        .unwrap_or_else(|| {
-            // Fall back to direct endpoint when explicit public URL is missing.
-            endpoint.clone()
-        });
-
-    let object_storage = ObjectStorageConfig {
-        region: env_with_fallback(
-            &[
-                "S3_REGION",
-                "GARAGE_S3_REGION",
-                "AWS_S3_REGION",
-                "AWS_REGION",
-            ],
-            Some("auto"),
-        )
-        .unwrap(),
-        account_id: env::var("S3_ACCOUNT_ID").unwrap_or_else(|_| "local".to_string()),
-        bucket,
-        access_key,
-        secret_key,
-        public_url,
-        endpoint,
-    };
+    // Object storage config is parsed fail-closed inside `Settings::from_env`;
+    // re-derive it here only to build the AWS client from its fields.
+    let object_storage = settings.object_storage.clone();
 
     // V-MED-8: do NOT log the raw ObjectStorageConfig — even with the manual
     // Debug impl redacting access_key/secret_key, emitting the whole struct at
@@ -272,16 +204,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // names are sometimes sensitive). Bucket wiring is already logged in a
     // redacted form just above (`tracing::debug!` of bucket/region/endpoint),
     // so echoing the full S3 list adds nothing. Removed entirely.
-    #[cfg(feature = "image-optimization")]
-    let optimizer = OptimizerConfig {
-        enabled: env_bool("OPTIMIZE_ON_UPLOAD", true),
-        // DOS-MEDIA-OPTIMIZER: 12Mpx (~4000x3000) is ample for blog imagery and
-        // ~3x cheaper to decode/resize/re-encode than the prior 40Mpx default,
-        // which let a 2 MiB PNG declare ~40Mpx and pin a worker for seconds.
-        max_pixels: env_u64("OPTIMIZER_MAX_PIXELS", 12_000_000),
-        keep_original: env_bool("OPTIMIZER_KEEP_ORIGINAL", true),
-        default_webp_quality: env_u8("OPTIMIZER_WEBP_QUALITY_DEFAULT", 80),
-    };
+    //
+    // The optimizer config (cfg image-optimization) and the cookie-transport /
+    // site / HTTP-bind settings now live on `settings` (parsed fail-closed in
+    // `Settings::from_env`) instead of being read ad-hoc here.
 
     // V-MED-10: ONE shared, timeout-configured reqwest::Client for all outbound
     // billing + Google HTTP calls. Built once here so a slow/hanging upstream
@@ -593,13 +519,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sea_db,
         redis_pool: redis_pool.clone(),
         mailer,
-        object_storage,
-        s3_client,
-        secret_key: cookie_key_str.as_bytes().to_vec(),
-        field_enc_key: ruxlog::state::load_field_enc_key(),
-        #[cfg(feature = "image-optimization")]
-        optimizer,
-        meter: telemetry::global_meter(),
+        settings: settings.clone(),
+        storage: StorageState {
+            config: object_storage,
+            client: s3_client,
+            #[cfg(feature = "image-optimization")]
+            optimizer: settings.optimizer.clone(),
+            #[cfg(feature = "image-moderation")]
+            image_moderator,
+        },
+        secret_key: settings.cookie_key.as_bytes().to_vec(),
         http_client,
         #[cfg(feature = "billing")]
         billing_router,
@@ -608,8 +537,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fcm,
         #[cfg(feature = "auth-passkey")]
         webauthn: webauthn_service,
-        #[cfg(feature = "image-moderation")]
-        image_moderator,
     };
 
     // Bootstrap application constants from environment (only fills missing keys) and warm Redis.
@@ -707,11 +634,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Key::derive_from applies HKDF-SHA256 to the material. Note: changing the
     // KDF rotates the derived key, so existing private cookies/sessions
     // invalidate and users re-authenticate once. See plan Phase 2d.
-    let cookie_key = Key::derive_from(cookie_key_str.as_bytes());
+    let cookie_key = Key::derive_from(settings.cookie_key.as_bytes());
 
     // Secure cookies by default; dev/local sets COOKIE_SECURE=false. A permanent
     // .with_secure(false) blocked the Secure flag in production. See plan 2e.
-    let cookie_secure = env_bool("COOKIE_SECURE", true);
+    let cookie_secure = settings.http.cookie_secure;
 
     let session_layer = SessionManagerLayer::new(session_store)
         .with_expiry(Expiry::OnInactivity(time::Duration::hours(24 * 14)))
@@ -750,10 +677,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .allow_credentials(true)
         .max_age(Duration::from_secs(360));
 
-    let ip_source: ClientIpSource = env::var("IP_SOURCE")
-        .unwrap_or_else(|_| "ConnectInfo".to_string())
-        .parse()
-        .expect("Invalid IP_SOURCE value");
+    // ClientIpSource is parsed fail-closed inside `Settings::from_env`; clone
+    // it off the shared `Arc<Settings>` (cheap) for `into_extension`.
+    let ip_source = settings.http.ip_source.clone();
 
     // Clone the database connection for the Extension layer (used by auth middleware)
     let db_extension = Extension(state.sea_db.clone());
@@ -795,8 +721,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = app.with_state(state);
 
-    let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port = env::var("PORT").unwrap_or_else(|_| "8888".to_string());
+    let host = settings.http.host.clone();
+    let port = settings.http.port.clone();
     let address = format!("{}:{}", host, port);
     let address = address.parse::<std::net::SocketAddr>()?;
     tracing::info!("Listening on http://{}", address);

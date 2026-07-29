@@ -156,7 +156,7 @@ pub async fn find_all_by_post(
 ) -> Result<impl IntoResponse, ErrorResponse> {
     match post_comment::Entity::find_all_by_post(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         post_id,
     )
     .await
@@ -188,18 +188,18 @@ pub async fn find_with_query(
 
     match post_comment::Entity::find_with_query(
         &state.sea_db,
-        &state.object_storage.public_url,
+        &state.storage.config.public_url,
         comment_query,
     )
     .await
     {
-        Ok((comments, total)) => {
-            info!(total, page, "Admin listed comments");
+        Ok(result) => {
+            info!(total = result.total, page, "Admin listed comments");
             Ok((
                 StatusCode::OK,
                 Json(json!({
-                    "data": comments,
-                    "total": total,
+                    "data": result.data,
+                    "total": result.total,
                     "per_page": post_comment::Entity::PER_PAGE,
                     "page": page,
                 })),
@@ -378,16 +378,16 @@ pub async fn admin_flags_list(
         sort_order: payload.sort_order.clone(),
     };
 
-    match comment_flag::Entity::list(&state.sea_db, &state.object_storage.public_url, q).await {
-        Ok((items, total)) => {
+    match comment_flag::Entity::list(&state.sea_db, &state.storage.config.public_url, q).await {
+        Ok(result) => {
             info!(
-                total,
+                total = result.total,
                 page = payload.page.unwrap_or(1),
                 "Admin listed comment flags"
             );
             Ok(Json(json!({
-                "data": items,
-                "total": total,
+                "data": result.data,
+                "total": result.total,
                 "page": payload.page.unwrap_or(1)
             })))
         }
@@ -429,14 +429,14 @@ pub async fn admin_flags_details(
         ..Default::default()
     };
 
-    match comment_flag::Entity::list(&state.sea_db, &state.object_storage.public_url, q).await {
-        Ok((items, _total)) => {
+    match comment_flag::Entity::list(&state.sea_db, &state.storage.config.public_url, q).await {
+        Ok(result) => {
             info!(
                 comment_id,
-                count = items.len(),
+                count = result.data.len(),
                 "Admin viewed comment flags details"
             );
-            Ok(Json(json!(items)))
+            Ok(Json(json!(result.data)))
         }
         Err(err) => {
             error!(comment_id, "Failed to get flags details: {}", err);

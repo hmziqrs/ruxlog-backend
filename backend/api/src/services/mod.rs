@@ -2,6 +2,7 @@
 pub mod abuse_limiter;
 pub mod auth;
 pub mod mail;
+pub mod media;
 pub mod paywall;
 pub mod redis;
 pub mod webhook_util;

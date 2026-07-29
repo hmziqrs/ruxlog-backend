@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::{db::sea_models::tag, error::DbResult};
+use ruxlog_types::PaginatedList;
 use sea_orm::{
     entity::prelude::*, prelude::Expr, sea_query::Alias, Condition, JoinType, Order, QueryOrder,
     QuerySelect, Set, TransactionTrait,
@@ -509,7 +510,7 @@ impl Entity {
         conn: &DbConn,
         public_url: &str,
         query: PostQuery,
-    ) -> DbResult<(Vec<PostWithRelations>, u64)> {
+    ) -> DbResult<PaginatedList<PostWithRelations>> {
         let mut post_query = Self::build_post_query_with_relations(public_url);
 
         if let Some(title_filter) = &query.title {
@@ -651,14 +652,14 @@ impl Entity {
             })
             .collect();
 
-        Ok((posts_with_relations, total))
+        Ok(PaginatedList::new(posts_with_relations, total, page, Self::PER_PAGE))
     }
 
     pub async fn find_published_paginated(
         conn: &DbConn,
         public_url: &str,
         query: PostQuery,
-    ) -> DbResult<(Vec<PostWithRelations>, u64)> {
+    ) -> DbResult<PaginatedList<PostWithRelations>> {
         let query = PostQuery {
             page_no: query.page_no,
             status: Some(PostStatus::Published),

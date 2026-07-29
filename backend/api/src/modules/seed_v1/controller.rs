@@ -90,7 +90,7 @@ pub async fn seed_categories(
             is_active: Some(true),
         };
 
-        match category::Entity::create(&state.sea_db, &state.object_storage.public_url, new_cat)
+        match category::Entity::create(&state.sea_db, &state.storage.config.public_url, new_cat)
             .await
         {
             Ok(tag) => fakes.push(tag),
@@ -158,12 +158,13 @@ pub async fn seed_posts(State(state): State<AppState>, _auth: AuthSession) -> im
             };
             match user::Entity::admin_list(
                 &state.sea_db,
-                &state.object_storage.public_url,
+                &state.storage.config.public_url,
                 author_query,
             )
             .await
             {
-                Ok((res, _)) => {
+                Ok(result) => {
+                    let res = result.data;
                     let len = res.len() as u64;
                     if len == user::Entity::PER_PAGE {
                         author_page += 1;
@@ -244,7 +245,7 @@ pub async fn seed_posts(State(state): State<AppState>, _auth: AuthSession) -> im
             };
 
             if let Err(err) =
-                post::Entity::create(&state.sea_db, &state.object_storage.public_url, new_post)
+                post::Entity::create(&state.sea_db, &state.storage.config.public_url, new_post)
                     .await
             {
                 println!("Error creating post: {:?}", err);
@@ -289,12 +290,13 @@ pub async fn seed_post_comments(
             };
             match user::Entity::admin_list(
                 &state.sea_db,
-                &state.object_storage.public_url,
+                &state.storage.config.public_url,
                 user_query,
             )
             .await
             {
-                Ok((res, _)) => {
+                Ok(result) => {
+                    let res = result.data;
                     let len = res.len() as u64;
                     if len == user::Entity::PER_PAGE {
                         user_page += 1;
@@ -848,7 +850,7 @@ pub async fn seed_media(State(state): State<AppState>, _auth: AuthSession) -> im
     for (i, (filename, mime_type, width, height, size)) in fake_files.iter().enumerate() {
         let new_media = media::Model {
             id: 0, // Auto-increment
-            bucket: Some(state.object_storage.bucket.clone()),
+            bucket: Some(state.storage.config.bucket.clone()),
             object_key: format!("seed/{}", filename),
             mime_type: mime_type.to_string(),
             width: *width,

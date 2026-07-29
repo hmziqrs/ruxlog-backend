@@ -13,11 +13,11 @@
 //! synchronous permanent bounces back into the suppression list. Mirrors
 //! `services::billing::router::BillingRouter`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use rux_provider_core::ProviderRegistry;
 use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 use tower_sessions_redis_store::fred::prelude::Pool as RedisPool;
@@ -83,8 +83,7 @@ impl Default for MailRouterLimits {
 }
 
 pub struct MailRouter {
-    providers: HashMap<String, Arc<dyn MailProvider>>,
-    default_provider: String,
+    registry: ProviderRegistry<dyn MailProvider>,
     redis_pool: RedisPool,
     db: DatabaseConnection,
     limits: MailRouterLimits,
@@ -93,7 +92,7 @@ pub struct MailRouter {
 
 impl MailRouter {
     pub fn new(
-        providers: HashMap<String, Arc<dyn MailProvider>>,
+        providers: std::collections::HashMap<String, Arc<dyn MailProvider>>,
         default_provider: String,
         redis_pool: RedisPool,
         db: DatabaseConnection,
@@ -101,8 +100,7 @@ impl MailRouter {
         rate_limit_enabled: bool,
     ) -> Self {
         Self {
-            providers,
-            default_provider,
+            registry: ProviderRegistry::new(providers, default_provider),
             redis_pool,
             db,
             limits,
@@ -112,13 +110,15 @@ impl MailRouter {
 
     /// Names of the registered providers (diagnostics).
     pub fn provider_names(&self) -> Vec<&str> {
-        self.providers.keys().map(|s| s.as_str()).collect()
+        self.registry.provider_names()
     }
 
     fn get_provider(&self, name: &str) -> Result<&Arc<dyn MailProvider>, MailError> {
-        self.providers
-            .get(name)
-            .ok_or_else(|| MailError::Config(format!("mail provider '{name}' not initialized")))
+        // Forwarded to the shared registry; FrameworkError is narrowed back to
+        // MailError::Config("mail provider '{name}' not initialized") by the
+        // From-impl in provider.rs — preserving the exact pre-refactor error
+        // variant + message (drift point #1 vs billing).
+        self.registry.get(name).map_err(MailError::from)
     }
 
     /// `Ok(true)` if `recipient` must be suppressed. `Err(())` on a DB error →
@@ -148,7 +148,7 @@ impl MailRouter {
         self.enforce(&format!("mail:send:rcpt:{recipient}"), self.limits.rcpt)
             .await?;
         self.enforce(
-            &format!("mail:send:provider:{}", self.default_provider),
+            &format!("mail:send:provider:{}", self.registry.default_provider()),
             self.limits.provider,
         )
         .await?;
@@ -156,7 +156,7 @@ impl MailRouter {
     }
 
     async fn enforce(&self, key: &str, cfg: AbuseLimiterConfig) -> Result<(), MailError> {
-        match abuse_limiter::check(&self.redis_pool, key, cfg).await {
+        match rux_request_gate::check(&self.redis_pool, &abuse_limiter::TelemetryHooks, key, cfg).await {
             Ok(LimiterDecision::Allowed { .. }) => Ok(()),
             Ok(LimiterDecision::Blocked {
                 retry_after_secs, ..
@@ -177,7 +177,7 @@ impl MailRouter {
     /// a near-term retry is deduped; the next send after the TTL proceeds).
     async fn release_dedup(&self, key: Option<&str>) {
         if let Some(key) = key {
-            abuse_limiter::release_dedup(&self.redis_pool, key).await;
+            rux_request_gate::release_dedup(&self.redis_pool, key).await;
         }
     }
 
@@ -222,7 +222,7 @@ impl MailProvider for MailRouter {
         "router"
     }
 
-    #[instrument(skip(self, msg), fields(provider = %self.default_provider, recipient_domain, result))]
+    #[instrument(skip(self, msg), fields(provider = %self.registry.default_provider(), recipient_domain, result))]
     async fn send(&self, msg: OutboundEmail) -> Result<SendReceipt, MailError> {
         let metrics = telemetry::mail_metrics();
         let router_metrics = telemetry::mail_router_metrics();
@@ -266,16 +266,14 @@ impl MailProvider for MailRouter {
         // codes change each request, so dedup is a no-op there.
         let dedup_claim = if msg.template == Some(TEMPLATE_NEWSLETTER) {
             let key = self.dedup_key(&msg);
-            match abuse_limiter::dedup_nx(&self.redis_pool, &key, self.limits.dedup_ttl_secs).await
+            if rux_request_gate::dedup_nx(&self.redis_pool, &key, self.limits.dedup_ttl_secs).await
             {
-                Ok(true) => Some(key), // newly claimed -> proceed, release on failure
-                Ok(false) => {
-                    // Already delivered within the window -> short-circuit.
-                    router_metrics.deduped.add(1, &[]);
-                    debug!("duplicate newsletter send suppressed");
-                    return Ok(SendReceipt::default());
-                }
-                Err(_) => None, // Redis blip -> fail-open (proceed, no claim held)
+                Some(key) // newly claimed -> proceed, release on failure
+            } else {
+                // Already delivered within the window -> short-circuit.
+                router_metrics.deduped.add(1, &[]);
+                debug!("duplicate newsletter send suppressed");
+                return Ok(SendReceipt::default());
             }
         } else {
             None
@@ -292,7 +290,7 @@ impl MailProvider for MailRouter {
         }
 
         // (5) Delegate to the selected provider.
-        let provider = self.get_provider(&self.default_provider)?;
+        let provider = self.get_provider(self.registry.default_provider())?;
         let provider_name = provider.provider_name();
         let receipt = match provider.send(msg).await {
             Ok(r) => r,
@@ -322,7 +320,12 @@ impl MailProvider for MailRouter {
     }
 
     async fn verify_webhook(&self, event: WebhookEvent) -> Result<ParsedMailEvent, MailError> {
-        let provider = self.get_provider(&event.provider)?;
+        // Uniform webhook dispatch through the shared registry. A missing
+        // provider narrows to MailError::Config("mail provider '{name}' not
+        // initialized") via the From-impl — PRESERVES drift point #1 (mail
+        // surfaces registry misses as Config, billing surfaces them as
+        // WebhookVerification in its own verify_webhook).
+        let provider = self.registry.get_for_webhook(&event).map_err(MailError::from)?;
         provider.verify_webhook(event).await
     }
 }

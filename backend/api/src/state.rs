@@ -1,8 +1,8 @@
 use axum::extract::FromRef;
-use opentelemetry::metrics::Meter;
 use sea_orm::DatabaseConnection;
 use tower_sessions_redis_store::fred::prelude::Pool as RedisPool;
 
+use crate::config::{ObjectStorageConfig, Settings};
 use crate::services::auth::AuthBackend;
 
 #[cfg(feature = "billing")]
@@ -13,6 +13,15 @@ use crate::services::billing::BillingRouter;
 use crate::services::image_moderation::ImageModerator;
 #[cfg(feature = "notifications")]
 use rux_fcm::FcmClient;
+
+// `OptimizerConfig` previously lived in `state` and still has an in-tree
+// consumer importing it via `crate::state::OptimizerConfig`
+// (`services/image_optimizer.rs`), so the re-export stays. `ObjectStorageConfig`
+// has no such `state::`-path consumer (all call sites read the typed config
+// directly via `state.storage.config.*`), so it is imported privately above for
+// the `StorageState::config` field only.
+#[cfg(feature = "image-optimization")]
+pub use crate::config::OptimizerConfig;
 
 /// V-MED-10: build a single `reqwest::Client` with sane connect/request timeouts
 /// and connection pooling. A slow/hanging upstream no longer pins a handler
@@ -39,43 +48,22 @@ pub fn build_http_client() -> reqwest::Client {
         .expect("building shared reqwest::Client with timeouts must not fail")
 }
 
-// V-MED-8: `ObjectStorageConfig` holds `access_key` + `secret_key`. A derived
-// `Debug` would print them in full (and `main.rs` previously logged the whole
-// struct at debug level). The manual impl below redacts the secrets to the
-// literal "<redacted>" while still printing the non-secret fields.
+/// The cohesive object-storage cluster, grouped out of `AppState`.
+///
+/// `client` is built at boot from `config` (the [`ObjectStorageConfig`]), and
+/// `optimizer`/`image_moderator` are the upload-path gates that always travel
+/// with the storage client on the media path. Grouping these (previously four
+/// flat `AppState` fields) keeps `AppState` a composition root rather than a
+/// 14-field god-object. URL/bucket consumers read `config.public_url` /
+/// `config.bucket` directly.
 #[derive(Clone)]
-pub struct ObjectStorageConfig {
-    // S3-compatible storage (Cloudflare R2, Garage, AWS S3, etc.)
-    pub region: String,
-    pub account_id: String,
-    pub bucket: String,
-    pub access_key: String,
-    pub secret_key: String,
-    pub public_url: String,
-    pub endpoint: String,
-}
-
-impl std::fmt::Debug for ObjectStorageConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ObjectStorageConfig")
-            .field("region", &self.region)
-            .field("account_id", &self.account_id)
-            .field("bucket", &self.bucket)
-            .field("access_key", &"<redacted>")
-            .field("secret_key", &"<redacted>")
-            .field("public_url", &self.public_url)
-            .field("endpoint", &self.endpoint)
-            .finish()
-    }
-}
-
-#[cfg(feature = "image-optimization")]
-#[derive(Clone, Debug)]
-pub struct OptimizerConfig {
-    pub enabled: bool,
-    pub max_pixels: u64,
-    pub keep_original: bool,
-    pub default_webp_quality: u8,
+pub struct StorageState {
+    pub config: ObjectStorageConfig,
+    pub client: aws_sdk_s3::Client,
+    #[cfg(feature = "image-optimization")]
+    pub optimizer: OptimizerConfig,
+    #[cfg(feature = "image-moderation")]
+    pub image_moderator: Option<std::sync::Arc<dyn ImageModerator + Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -83,23 +71,16 @@ pub struct AppState {
     pub sea_db: DatabaseConnection,
     pub redis_pool: RedisPool,
     pub mailer: std::sync::Arc<crate::services::mail::MailRouter>,
-    pub object_storage: ObjectStorageConfig,
-    pub s3_client: aws_sdk_s3::Client,
+    /// Typed, fail-closed boot configuration constructed once at startup (see
+    /// [`crate::config::Settings`]). Replaces the previously-scattered
+    /// `std::env::var` reads for the always-on core.
+    pub settings: std::sync::Arc<Settings>,
+    /// Cohesive object-storage cluster (S3 client + config + upload gates).
+    pub storage: StorageState,
     /// Server secret (the `COOKIE_KEY` bytes) used to derive keyed hashes for
     /// short-lived verification/reset codes (see `utils::code_hash`). Held here
     /// rather than re-reading env so the key is fixed for the process lifetime.
     pub secret_key: Vec<u8>,
-    /// V-MED-11: 32-byte AES-256 key for field-level encryption at rest
-    /// (`payout_accounts.metadata`, CWE-312). Loaded once from `FIELD_ENC_KEY`
-    /// and ALSO installed into the process-wide `utils::field_crypto` slot so
-    /// the SeaORM model layer can encrypt/decrypt without callers passing the
-    /// key through every read/write — no caller can forget to encrypt. A
-    /// dedicated key (not `COOKIE_KEY`) limits blast radius: a leaked cookie
-    /// key alone cannot decrypt payout metadata.
-    pub field_enc_key: [u8; 32],
-    #[cfg(feature = "image-optimization")]
-    pub optimizer: OptimizerConfig,
-    pub meter: Meter,
     /// V-MED-10: shared, timeout-configured HTTP client for all outbound
     /// billing/Google calls. Cheap to clone (internally `Arc`ed). Built once
     /// at startup via [`build_http_client`] and threaded into the billing
@@ -113,8 +94,6 @@ pub struct AppState {
     pub fcm: Option<std::sync::Arc<FcmClient>>,
     #[cfg(feature = "auth-passkey")]
     pub webauthn: Option<std::sync::Arc<crate::services::webauthn::WebauthnService>>,
-    #[cfg(feature = "image-moderation")]
-    pub image_moderator: Option<std::sync::Arc<dyn ImageModerator + Send + Sync>>,
 }
 
 impl FromRef<AppState> for AuthBackend {

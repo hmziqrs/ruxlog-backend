@@ -138,53 +138,11 @@ fn extension_for_mime(mime: &str) -> &'static str {
     }
 }
 
-#[derive(Debug, Default, Clone, Deserialize, Serialize, Validate)]
-pub struct MediaUploadMetadata {
-    pub reference_type: Option<MediaReference>,
-    pub width: Option<i32>,
-    pub height: Option<i32>,
-}
-
-impl MediaUploadMetadata {
-    pub fn apply_field(&mut self, name: &str, value: &str) -> Result<(), String> {
-        match name {
-            "reference_type" => {
-                if value.trim().is_empty() {
-                    self.reference_type = None;
-                } else {
-                    self.reference_type = Some(MediaReference::from_str(value.trim())?);
-                }
-            }
-            "width" => {
-                if value.trim().is_empty() {
-                    self.width = None;
-                } else {
-                    self.width = Some(
-                        value
-                            .trim()
-                            .parse::<i32>()
-                            .map_err(|_| format!("Invalid width: {}", value.trim()))?,
-                    );
-                }
-            }
-            "height" => {
-                if value.trim().is_empty() {
-                    self.height = None;
-                } else {
-                    self.height = Some(
-                        value
-                            .trim()
-                            .parse::<i32>()
-                            .map_err(|_| format!("Invalid height: {}", value.trim()))?,
-                    );
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-}
+// Canonical definition moved to the service layer (crate::services::media) so
+// the image optimizer service can use it without an inverted service→module
+// dependency. Re-exported here so existing `validator::MediaUploadMetadata`
+// references (this module's tests + the media controller) compile unchanged.
+pub use crate::services::media::MediaUploadMetadata;
 
 #[derive(Debug, Deserialize, Serialize, Validate)]
 pub struct V1MediaListQuery {

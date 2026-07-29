@@ -13,9 +13,9 @@ use crate::error::{ErrorCode, ErrorResponse};
 /// (scheme + host [+ port]) against an allow-list before issuing the redirect.
 ///
 /// Fail closed: if `FRONTEND_URL` is unset AND no allow-list is configured, we
-/// reject rather than redirect to an unvalidated default. See
-/// `google_auth_v1::controller::build_allowed_success_redirect` for the full
-/// rationale (V-LOW-REDIRECT).
+/// reject rather than redirect to an unvalidated default. (V-LOW-REDIRECT: this
+/// open-redirect defense was originally authored in `google_auth_v1` and lifted
+/// here so every OAuth provider applies it identically.)
 #[allow(clippy::result_large_err)]
 pub fn build_allowed_success_redirect(path: &str) -> Result<String, ErrorResponse> {
     let frontend_url = std::env::var("FRONTEND_URL").ok();

@@ -1,4 +1,5 @@
 use crate::error::DbResult;
+use ruxlog_types::PaginatedList;
 use sea_orm::{entity::prelude::*, Order, QueryOrder, Set};
 
 use super::*;
@@ -27,7 +28,7 @@ impl Entity {
         conn: &DbConn,
         post_id: i32,
         query: PostViewQuery,
-    ) -> DbResult<(Vec<Model>, u64)> {
+    ) -> DbResult<PaginatedList<Model>> {
         let mut post_view_query = Self::find().filter(Column::PostId.eq(post_id));
 
         if let Some(ip_address) = &query.ip_address {
@@ -68,7 +69,7 @@ impl Entity {
 
         match paginator.num_items().await {
             Ok(total) => match paginator.fetch_page(page - 1).await {
-                Ok(results) => Ok((results, total)),
+                Ok(results) => Ok(PaginatedList::new(results, total, page, Self::PER_PAGE)),
                 Err(err) => Err(err.into()),
             },
             Err(err) => Err(err.into()),

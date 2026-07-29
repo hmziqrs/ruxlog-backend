@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use maxminddb::Reader as MaxMindReader;
+use rux_provider_core::ProviderRegistry;
 use serde::Deserialize;
 
 use super::provider::{
@@ -206,9 +207,8 @@ impl GeoRouter {
 
 /// Holds all initialized providers and routes requests to the correct one.
 pub struct BillingRouter {
-    providers: HashMap<String, Arc<dyn BillingProvider>>,
+    registry: ProviderRegistry<dyn BillingProvider>,
     geo_router: GeoRouter,
-    default_provider: String,
 }
 
 impl BillingRouter {
@@ -218,9 +218,8 @@ impl BillingRouter {
     ) -> Self {
         let default_provider = geo_router.default_provider.clone();
         Self {
-            providers,
+            registry: ProviderRegistry::new(providers, default_provider),
             geo_router,
-            default_provider,
         }
     }
 
@@ -234,7 +233,7 @@ impl BillingRouter {
         success_url: &str,
         cancel_url: &str,
     ) -> Result<CheckoutSession, BillingError> {
-        let provider_name = self.geo_router.resolve(client_ip, &self.providers);
+        let provider_name = self.geo_router.resolve(client_ip, self.registry.providers());
         let provider = self.get_provider(&provider_name)?;
         tracing::info!(
             ip = %client_ip,
@@ -263,7 +262,7 @@ impl BillingRouter {
         success_url: &str,
         cancel_url: &str,
     ) -> Result<CheckoutSession, BillingError> {
-        let provider_name = self.geo_router.resolve(client_ip, &self.providers);
+        let provider_name = self.geo_router.resolve(client_ip, self.registry.providers());
         let provider = self.get_provider(&provider_name)?;
         tracing::info!(
             ip = %client_ip,
@@ -322,17 +321,19 @@ impl BillingRouter {
     }
 
     fn get_provider(&self, name: &str) -> Result<&Arc<dyn BillingProvider>, BillingError> {
-        self.providers
-            .get(name)
-            .ok_or_else(|| BillingError::Config(format!("Provider '{}' not initialized", name)))
+        // Forwarded to the shared registry; FrameworkError narrows back to
+        // BillingError::Config("Provider '{name}' not initialized") via the
+        // From-impl in provider.rs — preserving the exact pre-refactor error
+        // variant + message.
+        self.registry.get(name).map_err(BillingError::from)
     }
 
     pub fn provider_names(&self) -> Vec<&str> {
-        self.providers.keys().map(|s| s.as_str()).collect()
+        self.registry.provider_names()
     }
 
     pub fn has_provider(&self, name: &str) -> bool {
-        self.providers.contains_key(name)
+        self.registry.has_provider(name)
     }
 }
 
@@ -351,7 +352,7 @@ impl BillingProvider for BillingRouter {
         cancel_url: &str,
     ) -> Result<CheckoutSession, BillingError> {
         // Fallback when no IP is available — use default provider
-        let provider = self.get_provider(&self.default_provider)?;
+        let provider = self.get_provider(self.registry.default_provider())?;
         provider
             .create_checkout(plan_slug, customer_email, user_id, success_url, cancel_url)
             .await
@@ -362,7 +363,7 @@ impl BillingProvider for BillingRouter {
         provider_subscription_id: &str,
         immediately: bool,
     ) -> Result<(), BillingError> {
-        let provider = self.get_provider(&self.default_provider)?;
+        let provider = self.get_provider(self.registry.default_provider())?;
         provider
             .cancel_subscription(provider_subscription_id, immediately)
             .await
@@ -372,13 +373,18 @@ impl BillingProvider for BillingRouter {
         &self,
         provider_subscription_id: &str,
     ) -> Result<SubscriptionInfo, BillingError> {
-        let provider = self.get_provider(&self.default_provider)?;
+        let provider = self.get_provider(self.registry.default_provider())?;
         provider.get_subscription(provider_subscription_id).await
     }
 
     async fn verify_webhook(&self, event: WebhookEvent) -> Result<ParsedWebhook, BillingError> {
-        // Route to the provider named in the webhook event
-        let provider = self.get_provider(&event.provider).map_err(|_| {
+        // Uniform webhook dispatch through the shared registry. PRESERVES drift
+        // point #1: an unknown provider is surfaced as
+        // `BillingError::WebhookVerification("Unknown provider '{}' for webhook")`
+        // (different HTTP semantics from the generic lookup path's
+        // `BillingError::Config`), so this mapping is applied explicitly here
+        // rather than via the From-impl used by get_provider.
+        let provider = self.registry.get_for_webhook(&event).map_err(|_| {
             BillingError::WebhookVerification(format!(
                 "Unknown provider '{}' for webhook",
                 event.provider
@@ -392,7 +398,7 @@ impl BillingProvider for BillingRouter {
         provider_customer_id: &str,
         return_url: &str,
     ) -> Result<String, BillingError> {
-        let provider = self.get_provider(&self.default_provider)?;
+        let provider = self.get_provider(self.registry.default_provider())?;
         provider
             .create_portal_session(provider_customer_id, return_url)
             .await

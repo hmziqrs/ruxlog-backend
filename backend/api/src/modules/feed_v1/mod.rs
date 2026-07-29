@@ -165,9 +165,8 @@ pub mod controller {
         State(state): State<AppState>,
         Query(params): Query<FeedQuery>,
     ) -> Result<impl IntoResponse, ErrorResponse> {
-        let site_url =
-            std::env::var("SITE_URL").unwrap_or_else(|_| "http://localhost:8888".to_string());
-        let site_name = std::env::var("SITE_NAME").unwrap_or_else(|_| "Ruxlog".to_string());
+        let site_url = state.settings.site.url.clone();
+        let site_name = state.settings.site.name.clone();
 
         let limit = params.limit.unwrap_or(20).min(100);
         let posts = fetch_latest_posts(&state, limit).await?;
@@ -241,9 +240,8 @@ pub mod controller {
         State(state): State<AppState>,
         Query(params): Query<FeedQuery>,
     ) -> Result<impl IntoResponse, ErrorResponse> {
-        let site_url =
-            std::env::var("SITE_URL").unwrap_or_else(|_| "http://localhost:8888".to_string());
-        let site_name = std::env::var("SITE_NAME").unwrap_or_else(|_| "Ruxlog".to_string());
+        let site_url = state.settings.site.url.clone();
+        let site_name = state.settings.site.name.clone();
 
         let limit = params.limit.unwrap_or(20).min(100);
         let posts = fetch_latest_posts(&state, limit).await?;

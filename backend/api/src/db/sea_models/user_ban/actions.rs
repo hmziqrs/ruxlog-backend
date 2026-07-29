@@ -1,6 +1,7 @@
 use sea_orm::{entity::prelude::*, Order, PaginatorTrait, QueryFilter, QueryOrder, Set};
 
 use crate::error::DbResult;
+use ruxlog_types::PaginatedList;
 
 use super::*;
 
@@ -88,7 +89,7 @@ impl Entity {
         conn: &DbConn,
         user_id: i32,
         page_no: Option<i64>,
-    ) -> DbResult<(Vec<Model>, u64)> {
+    ) -> DbResult<PaginatedList<Model>> {
         let page: u64 = match page_no {
             Some(p) if p > 0 => p as u64,
             _ => 1,
@@ -102,7 +103,7 @@ impl Entity {
 
         match paginator.num_items().await {
             Ok(total) => match paginator.fetch_page(page - 1).await {
-                Ok(results) => Ok((results, total)),
+                Ok(results) => Ok(PaginatedList::new(results, total, page, Self::PER_PAGE)),
                 Err(err) => Err(err.into()),
             },
             Err(err) => Err(err.into()),
@@ -110,7 +111,7 @@ impl Entity {
     }
 
     /// Admin list with filters (paginated)
-    pub async fn admin_list(conn: &DbConn, query: UserBanQuery) -> DbResult<(Vec<Model>, u64)> {
+    pub async fn admin_list(conn: &DbConn, query: UserBanQuery) -> DbResult<PaginatedList<Model>> {
         let mut q = Self::find();
 
         if let Some(user_id) = query.user_id {
@@ -149,7 +150,7 @@ impl Entity {
 
         match paginator.num_items().await {
             Ok(total) => match paginator.fetch_page(page - 1).await {
-                Ok(results) => Ok((results, total)),
+                Ok(results) => Ok(PaginatedList::new(results, total, page, Self::PER_PAGE)),
                 Err(err) => Err(err.into()),
             },
             Err(err) => Err(err.into()),

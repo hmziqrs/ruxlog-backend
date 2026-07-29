@@ -8,22 +8,8 @@
 //! [`Statement::from_sql_and_values`], so they need this statement-level helper
 //! instead.
 
+use ruxlog_types::PaginatedList;
 use sea_orm::{DatabaseBackend, DbConn, DbErr, FromQueryResult, Statement, Value};
-
-/// A lightweight page result for raw SQL pagination.
-///
-/// Unlike [`crate::db::sea_models::pagination::PagedResult`], this does not
-/// impose a [`Page`](crate::db::sea_models::pagination::Page) metadata shape on
-/// the caller. It returns just the decoded rows and the total row count, leaving
-/// the response envelope (e.g. `AnalyticsMeta`) to the caller. This is the shape
-/// the analytics endpoints use, which keep their own metadata.
-#[derive(Debug, Clone)]
-pub struct PagedRaw<T> {
-    /// The rows for the requested page window.
-    pub rows: Vec<T>,
-    /// Total number of rows the unbounded query would return (for pagination meta).
-    pub total: u64,
-}
 
 #[derive(Debug, FromQueryResult)]
 struct CountRow {
@@ -63,7 +49,7 @@ pub async fn paginate_query<T>(
     params: Vec<Value>,
     page: u64,
     per_page: u64,
-) -> Result<PagedRaw<T>, DbErr>
+) -> Result<PaginatedList<T>, DbErr>
 where
     T: FromQueryResult + Send + Sync,
 {
@@ -102,5 +88,5 @@ where
         Statement::from_sql_and_values(DatabaseBackend::Postgres, paged_sql, paged_params);
     let rows = T::find_by_statement(paged_stmt).all(conn).await?;
 
-    Ok(PagedRaw { rows, total })
+    Ok(PaginatedList::new(rows, total, current_page, page_size))
 }

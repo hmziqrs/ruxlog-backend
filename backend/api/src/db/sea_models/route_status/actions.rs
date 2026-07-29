@@ -1,4 +1,5 @@
 use super::*;
+use ruxlog_types::PaginatedList;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, DeleteResult, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
@@ -76,7 +77,7 @@ impl Entity {
     pub async fn search(
         db: &DatabaseConnection,
         query: RouteStatusQuery,
-    ) -> Result<(Vec<Model>, u64), DbErr> {
+    ) -> Result<PaginatedList<Model>, DbErr> {
         let mut route_query = Entity::find();
 
         match BlockFilter::resolve(query.block_filter) {
@@ -137,7 +138,7 @@ impl Entity {
             .all(db)
             .await?;
 
-        Ok((items, total))
+        Ok(PaginatedList::new(items, total, page, Self::PER_PAGE))
     }
 
     pub async fn delete_by_pattern(

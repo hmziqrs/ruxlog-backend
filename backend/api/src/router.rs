@@ -70,7 +70,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/csrf/v1/generate", post(csrf_v1::controller::generate))
         .nest(
             "/auth/v1",
-            auth_v1::routes().layer(rate_limit::RateLimitLayer::new(state.clone(), 100, 60)),
+            auth_v1::routes().layer(rate_limit::rate_limit_layer(&state, 100, 60)),
         );
 
     #[cfg(feature = "auth-oauth")]
@@ -95,18 +95,14 @@ pub fn router(state: AppState) -> Router<AppState> {
     // that previously hit the txn-per-request view counter unbounded).
     router = router.nest(
         "/post/v1",
-        post_v1::routes().layer(rate_limit::RateLimitLayer::new(state.clone(), 200, 60)),
+        post_v1::routes().layer(rate_limit::rate_limit_layer(&state, 200, 60)),
     );
 
     #[cfg(feature = "comments")]
     {
         router = router.nest(
             "/post/comment/v1",
-            post_comment_v1::routes().layer(rate_limit::RateLimitLayer::new(
-                state.clone(),
-                100,
-                60,
-            )), // 100 req/min
+            post_comment_v1::routes().layer(rate_limit::rate_limit_layer(&state, 100, 60)), // 100 req/min
         );
     }
 
@@ -119,7 +115,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         // author-gated) so a burst of uploads cannot monopolize workers.
         .nest(
             "/media/v1",
-            media_v1::routes().layer(rate_limit::RateLimitLayer::new(state.clone(), 30, 60)),
+            media_v1::routes().layer(rate_limit::rate_limit_layer(&state, 30, 60)),
         )
         .nest("/feed/v1", feed_v1::routes())
         // DOS-SEARCH-1: search runs a triple leading-wildcard ILIKE (full table
@@ -127,14 +123,14 @@ pub fn router(state: AppState) -> Router<AppState> {
         // an anonymous caller cheaply minting a CSRF token then replaying it.
         .nest(
             "/search/v1",
-            search_v1::routes().layer(rate_limit::RateLimitLayer::new(state.clone(), 30, 60)),
+            search_v1::routes().layer(rate_limit::rate_limit_layer(&state, 30, 60)),
         );
 
     #[cfg(feature = "newsletter")]
     {
         router = router.nest(
             "/newsletter/v1",
-            newsletter_v1::routes().layer(rate_limit::RateLimitLayer::new(state.clone(), 100, 60)), // 100 req/min
+            newsletter_v1::routes().layer(rate_limit::rate_limit_layer(&state, 100, 60)), // 100 req/min
         );
     }
 
@@ -169,15 +165,11 @@ pub fn router(state: AppState) -> Router<AppState> {
         router = router
             .nest(
                 "/device/v1",
-                device_v1::routes().layer(rate_limit::RateLimitLayer::new(state.clone(), 100, 60)),
+                device_v1::routes().layer(rate_limit::rate_limit_layer(&state, 100, 60)),
             )
             .nest(
                 "/notification/v1",
-                notification_v1::routes().layer(rate_limit::RateLimitLayer::new(
-                    state.clone(),
-                    100,
-                    60,
-                )),
+                notification_v1::routes().layer(rate_limit::rate_limit_layer(&state, 100, 60)),
             );
     }
 
@@ -291,8 +283,7 @@ async fn sitemap_xml(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let raw_base_url =
-        std::env::var("CONSUMER_SITE_URL").unwrap_or_else(|_| "https://ruxlog.com".to_string());
+    let raw_base_url = state.settings.site.consumer_site_url.clone();
     // SITEMAP-XML-1: escape both the operator base URL and every post slug
     // before interpolating into XML. Slugs are author-controlled and only
     // length-validated, so unescaped interpolation is a stored XML-injection

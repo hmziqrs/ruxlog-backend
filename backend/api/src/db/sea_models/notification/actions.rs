@@ -1,4 +1,5 @@
 use crate::error::{DbResult, DbResultExt};
+use ruxlog_types::PaginatedList;
 use sea_orm::{entity::prelude::*, Order, QueryOrder, Set};
 use tracing::{info, instrument};
 
@@ -27,13 +28,13 @@ impl Entity {
     }
 
     /// Newest-first paginated inbox for a user. `page` is 1-based; `per_page`
-    /// is clamped to `[1, 100]` (0 ⇒ default). Returns `(items, total)`.
+    /// is clamped to `[1, 100]` (0 ⇒ default).
     pub async fn list_for_user(
         conn: &DbConn,
         user_id: i32,
         page: u64,
         per_page: u64,
-    ) -> DbResult<(Vec<Model>, u64)> {
+    ) -> DbResult<PaginatedList<Model>> {
         let per_page = if per_page == 0 {
             Self::PER_PAGE
         } else {
@@ -47,7 +48,7 @@ impl Entity {
             .paginate(conn, per_page);
         let total = paginator.num_items().await.map_err_to_response()?;
         let items = paginator.fetch_page(page - 1).await.map_err_to_response()?;
-        Ok((items, total))
+        Ok(PaginatedList::new(items, total, page, per_page))
     }
 
     /// Count of unread notifications for a user (bell badge).

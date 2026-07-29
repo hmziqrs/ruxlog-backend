@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
 use crate::utils::telemetry;
-use crate::{modules::media_v1::validator::MediaUploadMetadata, state::OptimizerConfig};
+use crate::{services::media::MediaUploadMetadata, state::OptimizerConfig};
 
 use crate::db::sea_models::media::MediaReference;
 

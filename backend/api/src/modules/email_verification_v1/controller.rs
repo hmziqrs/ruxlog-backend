@@ -120,9 +120,16 @@ pub async fn resend(
         Ok(verification) => {
             if verification.is_in_delay() {
                 warn!(user_id, "Email verification resend in delay period");
-                return Err(ErrorResponse::new(ErrorCode::TooManyAttempts).with_message(
-                    "Please wait 1 minute before requesting a new verification code",
-                ));
+                return Err(ErrorResponse::new(ErrorCode::TooManyAttempts)
+                    .with_message(
+                        "Please wait 1 minute before requesting a new verification code",
+                    )
+                    // AUTH_007 parity: every TooManyAttempts 429 carries a
+                    // Retry-After, matching `abuse_limiter::map_limiter_result`.
+                    // The resend delay window is
+                    // `email_verification::Entity::DELAY_TIME` (60s), which the
+                    // message text above also promises.
+                    .with_retry_after(60));
             }
         }
         Err(err) => {
@@ -197,7 +204,9 @@ pub async fn admin_list(
     let page = payload.page_no.unwrap_or(1).max(1) as u64;
     let query = payload.0.into_query();
 
-    let (records, total) = email_verification::Entity::admin_query(&state.sea_db, &query).await?;
+    let result = email_verification::Entity::admin_query(&state.sea_db, &query).await?;
+    let total = result.total;
+    let records = result.data;
 
     // Batch-fetch the owning users so the admin can see who each record belongs
     // to without an N+1. The table is unique on user_id, so this is at most

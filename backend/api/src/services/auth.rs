@@ -423,6 +423,62 @@ pub fn revoked_set_key() -> String {
 /// Used to TTL the revocation set so it cannot grow without bound.
 pub const SESSION_MAX_AGE_SECS: i64 = 14 * 24 * 60 * 60;
 
+// ── Session id mapping (PG user_sessions row ⇄ tower-session id) ──────────
+// Relocated from modules::auth_v1 so the OAuth login path (services::oauth)
+// can record the mapping without an inverted service→module dependency.
+
+/// Redis key holding the tower-session id for a given `user_sessions.id`.
+pub(crate) fn session_mapping_key(pg_session_id: i32) -> String {
+    format!("rux:sid_map:{pg_session_id}")
+}
+
+/// Persist `user_sessions.id -> tower_session_id` so terminate can later find
+/// and kill the live tower-sessions record. TTLs with the session max-age.
+pub(crate) async fn record_session_mapping(
+    redis_pool: &tower_sessions_redis_store::fred::prelude::Pool,
+    pg_session_id: i32,
+    tower_session_id: &str,
+) {
+    use tower_sessions_redis_store::fred::interfaces::KeysInterface;
+
+    let key = session_mapping_key(pg_session_id);
+    let set_result: Result<(), _> = redis_pool
+        .set::<(), _, _>(
+            key,
+            tower_session_id.to_string(),
+            Some(fred::types::Expiration::EX(SESSION_MAX_AGE_SECS)),
+            None,
+            false,
+        )
+        .await;
+    if let Err(e) = set_result {
+        warn!(error = %e, "Failed to record tower-session mapping");
+    }
+}
+
+/// Look up the tower-session id previously recorded for a `user_sessions.id`.
+/// Returns `None` if the mapping is absent (pre-fix rows, or expired).
+pub(crate) async fn lookup_session_mapping(
+    redis_pool: &tower_sessions_redis_store::fred::prelude::Pool,
+    pg_session_id: i32,
+) -> Option<String> {
+    use tower_sessions_redis_store::fred::interfaces::KeysInterface;
+
+    let key = session_mapping_key(pg_session_id);
+    match redis_pool.get::<Option<String>, _>(key).await {
+        Ok(Some(sid)) => Some(sid),
+        Ok(None) => None,
+        Err(e) => {
+            warn!(
+                error = %e,
+                session_id = pg_session_id,
+                "Failed to look up tower-session mapping; live record cannot be DEL'd (revoked_at is audit-only)"
+            );
+            None
+        }
+    }
+}
+
 /// V-HIGH-2 real per-request session revocation.
 ///
 /// `AuthBackend::delete_tower_session` (run by the `sessions_terminate` handler)

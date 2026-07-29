@@ -710,10 +710,8 @@ pub async fn webhook_receiver(
         hasher.update(body.as_ref());
         let body_hash = hex::encode(hasher.finalize());
         let dedup_key = format!("webhook:{provider}:{body_hash}");
-        if !crate::services::abuse_limiter::dedup_nx(&state.redis_pool, &dedup_key, 86_400)
-            .await
-            .unwrap_or(true)
-        {
+        if !rux_request_gate::dedup_nx(&state.redis_pool, &dedup_key, 86_400).await {
+
             tracing::info!(
                 provider = %provider,
                 "Replay webhook (already processed within 24h); acknowledging"

@@ -1,0 +1,13 @@
+[package]
+name = "rux-provider-core"
+version = "0.1.0"
+edition = "2021"
+description = "Domain-free plumbing shared by the mail and billing provider stacks: WebhookEvent envelope, Provider marker, ProviderRegistry, FrameworkError"
+publish = false
+
+[dependencies]
+thiserror = "2.0"
+# `http::HeaderMap` is the exact type axum 0.8 re-exports as `axum::http::HeaderMap`
+# (axum 0.8 depends on http 1.x), so a `WebhookEvent` built by the api crate with an
+# `axum::http::HeaderMap` value type-checks against this crate's `http::HeaderMap`.
+http = "1.0"

@@ -9,13 +9,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev libpq-dev build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Build straight from the real sources. An earlier revision had a separate
-# "deps" stage that copied only manifests, stubbed lib.rs/main.rs, and ran
-# `cargo fetch` to warm a download-cache layer. That stubbed resolution differs
-# from the committed Cargo.lock, and the CARGO_HOME it populated carried into
-# the builder and made the real `cargo build --release --locked` reject the
-# lock. Building from real sources keeps resolution identical to the lock. The
-# resulting image is still layer-cached across `docker compose build` runs.
+# Build backend/api STANDALONE. It is normally a member of the repo-root
+# workspace (see /Cargo.toml), so host/CI builds resolve against the ROOT
+# Cargo.lock. This image deliberately does NOT copy the root Cargo.toml, so
+# cargo treats backend/api as a standalone package and builds against
+# backend/api/Cargo.lock — which must therefore be a valid *standalone* lock
+# (it is ignored by the root workspace, so it drifts independently).
+#
+# If `cargo build --release --locked` fails here with "cannot update the lock",
+# the standalone lock is stale. Regenerate it in ISOLATION (no root workspace
+# visible) and commit:
+#   docker run --rm -v "$PWD":/w rust:1.96.0-slim-trixie bash -c '\
+#     rm -rf /tmp/i && mkdir -p /tmp/i/backend /tmp/i/crates && \
+#     cp -r /w/backend/api /tmp/i/backend/api && \
+#     cp -r /w/crates/ruxlog-types /tmp/i/crates/ruxlog-types && \
+#     rm -rf /tmp/i/backend/api/target /tmp/i/crates/ruxlog-types/target /tmp/i/backend/api/Cargo.lock && \
+#     cd /tmp/i/backend/api && cargo generate-lockfile && \
+#     cp Cargo.lock /w/backend/api/Cargo.lock'
 FROM base AS builder
 COPY backend/api backend/api
 COPY crates/ruxlog-types crates/ruxlog-types

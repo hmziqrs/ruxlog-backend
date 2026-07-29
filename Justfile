@@ -8,6 +8,56 @@ dotenv_bin := "dotenv"
 default:
     @just --list
 
+# Rust workspace maintenance -----------------------------------------------
+
+# Clean one project (`consumer`, `admin`, or `api`), or every Cargo workspace.
+clean project='all':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    project_name="{{project}}"
+    project_name="${project_name#project=}"
+
+    case "${project_name}" in
+        consumer)
+            cargo clean \
+                --package consumer-dioxus \
+                --package oxcore \
+                --package oxstore \
+                --package oxform \
+                --package oxui \
+                --package ruxlog-shared
+            ;;
+        admin)
+            cargo clean \
+                --package admin-dioxus \
+                --package oxcore \
+                --package oxstore \
+                --package oxform \
+                --package oxui \
+                --package ruxlog-shared
+            ;;
+        api)
+            cargo clean \
+                --package ruxlog \
+                --package ruxlog-types \
+                --package migration \
+                --package rux-auth \
+                --package rux-fcm \
+                --package rux-provider-core \
+                --package rux-request-gate \
+                --package rux-webhook-crypto
+            ;;
+        all)
+            cargo clean
+            cargo clean --manifest-path frontend/dioxus_pkgs/sdk/Cargo.toml
+            cargo clean --manifest-path frontend/dioxus_pkgs/free-icons/Cargo.toml
+            ;;
+        *)
+            echo "Unknown project '${project_name}'. Expected: consumer, admin, api, or all." >&2
+            exit 2
+            ;;
+    esac
+
 # Docker orchestration ------------------------------------------------------
 
 dev env='dev':
@@ -73,7 +123,13 @@ _fe app cmd env:
     set -euo pipefail
     dir="frontend/{{app}}-dioxus"
     case "{{cmd}}" in
-        dev)                cd "$dir" && {{dotenv_bin}} -e "../../.env.{{env}}" -- bash -c 'dx serve --platform web --port ${{uppercase(app)}}_PORT' ;;
+        # dx 0.8-alpha enables Rust hot-patching by default, which injects an
+        # unresolved __wbindgen_placeholder__ import → the WASM client never
+        # instantiates (WebAssembly.instantiate Import #1 error → no SPA, full
+        # page reloads on every navigation). Disable it for web dev. Remove the
+        # --hot-patch=false once dx ships a fixed default. (Desktop/mobile use a
+        # native renderer, not browser WASM, so they are unaffected.)
+        dev)                cd "$dir" && {{dotenv_bin}} -e "../../.env.{{env}}" -- bash -c 'dx serve --platform web --port ${{uppercase(app)}}_PORT --hot-patch=false' ;;
         desktop)            cd "$dir" && {{dotenv_bin}} -e "../../.env.{{env}}" -- bash -c 'dx serve --platform desktop --port ${{uppercase(app)}}_PORT' ;;
         desktop-native)     cd "$dir" && {{dotenv_bin}} -e "../../.env.{{env}}" -- bash -c 'dx serve --platform desktop --renderer native --port ${{uppercase(app)}}_PORT' ;;
         mobile)             cd "$dir" && {{dotenv_bin}} -e "../../.env.{{env}}" -- bash -c 'dx serve --platform android --port ${{uppercase(app)}}_PORT' ;;
